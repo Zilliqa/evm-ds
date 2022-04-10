@@ -19,6 +19,8 @@ use jsonrpc_ipc_server;
 use primitive_types::*;
 use scillabackend::ScillaBackend;
 
+use tokio;
+
 mod scillabackend;
 
 /// EVM JSON-RPC server
@@ -116,7 +118,7 @@ impl tracing::EventListener for LoggingEventListener {
     }
 }
 
-fn main() {
+fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     env_logger::Builder::new()
         .filter_level(log::LevelFilter::Info)
         .parse_env("EVM_LOG")
@@ -134,7 +136,8 @@ fn main() {
     //     Ok(Value::String("hello".into()))
     // });
 
-    let scilla_backend = ScillaBackend;
+    // Connect to the backend as needed.
+    let scilla_backend = ScillaBackend::new(args.node_socket);
     let evm_sever = EvmServer {
         tracing: args.tracing,
         backend: scilla_backend,
@@ -153,4 +156,6 @@ fn main() {
 
     ipc_server.wait();
     http_server.wait();
+
+    Ok(())
 }

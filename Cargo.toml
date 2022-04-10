@@ -7,12 +7,13 @@ edition = "2021"
 clap = { version = "3.1.6", features = ["derive"] }
 env_logger = "0.9.0"
 evm = { version = "0.35.0", features = ["with-serde", "tracing"] }
+futures = "0.3.21"
 jsonrpc-core = "18.0.0"
-jsonrpc-core-client = "18.0.0"
+jsonrpc-core-client = { version = "18.0.0", features = ["ipc"] }
 jsonrpc-derive = "18.0.0"
 jsonrpc-ipc-server = "18.0.0"
 jsonrpc-http-server = "18.0.0"
 log = "0.4.16"
 primitive-types = { version = "0.11.1", features = ["serde"] }
 hex = "0.4"
-
+tokio = { version = "1.17", features = ["full"] }

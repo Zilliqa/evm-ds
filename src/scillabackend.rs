@@ -1,8 +1,43 @@
-/// Backend implementation that stores EVM state in Scilla variables.
 use evm::backend::{Backend, Basic};
+use jsonrpc_core_client::{transports::ipc, RpcChannel, RpcError};
 use primitive_types::{H160, H256, U256};
+/// Backend implementation that stores EVM state via the Scilla JSONRPC interface.
+use std::cell::RefCell;
+use std::sync::Arc;
+use std::path::{Path, PathBuf};
+use std::sync::{Mutex, MutexGuard};
+use std::ops::DerefMut;
 
-pub struct ScillaBackend;
+
+// Backend relying on Scilla variables and Scilla JSONRPC interface.
+pub struct ScillaBackend {
+    // Path to the Unix domain socket over which we talk to the Node.
+    path: PathBuf,
+
+    // Established JSONRPC channel.
+    channel: Arc<Mutex<Option<RpcChannel>>>,
+}
+
+impl ScillaBackend {
+    pub fn new<P: AsRef<Path>>(path: P) -> Self {
+        Self {
+            path: path.as_ref().to_path_buf(),
+            channel: Arc::new(Mutex::new(None)),
+        }
+    }
+
+    pub fn channel(&self) -> Result<MutexGuard<'_, Option<RpcChannel>>, RpcError> {
+        let mut guard = self.channel.lock().unwrap();
+        if guard.is_none() {
+            let channel = futures::executor::block_on(async {
+                let channel = ipc::connect(&self.path).await?;
+                Result::<RpcChannel, RpcError>::Ok(channel)
+            })?;
+            *guard.deref_mut() = Some(channel);
+        }
+        Ok(guard)
+    }
+}
 
 // impl<'config> StackState<'config> for ScillaState {
 //     fn metadata(&self) -> &StackSubstateMetadata<'config>;
