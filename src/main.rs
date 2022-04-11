@@ -5,6 +5,7 @@
 
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::rc::Rc;
+use std::path::PathBuf;
 
 use clap::Parser;
 use evm::executor::stack::{MemoryStackState, StackSubstateMetadata};
@@ -17,9 +18,7 @@ use jsonrpc_core::{Error, IoHandler, Result};
 use jsonrpc_derive::rpc;
 use jsonrpc_ipc_server;
 use primitive_types::*;
-use scillabackend::ScillaBackend;
-
-use tokio;
+use scillabackend::ScillaBackendFactory;
 
 mod scillabackend;
 
@@ -59,7 +58,7 @@ pub trait Rpc {
 
 pub struct EvmServer {
     tracing: bool,
-    backend: ScillaBackend,
+    backend_factory: ScillaBackendFactory,
 }
 
 // TODO: remove this and introduce gas limit calculation based on balance etc.
@@ -87,7 +86,8 @@ impl Rpc for EvmServer {
         };
         let mut runtime = evm::Runtime::new(code, data, context, &config);
         let metadata = StackSubstateMetadata::new(GAS_LIMIT, &config);
-        let state = MemoryStackState::new(metadata, &self.backend);
+        let backend = self.backend_factory.new_backend();
+        let state = MemoryStackState::new(metadata, &backend);
 
         // TODO: replace with the real precompiles
         let precompiles = ();
@@ -137,10 +137,9 @@ fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     // });
 
     // Connect to the backend as needed.
-    let scilla_backend = ScillaBackend::new(args.node_socket);
     let evm_sever = EvmServer {
         tracing: args.tracing,
-        backend: scilla_backend,
+        backend_factory: ScillaBackendFactory { path: PathBuf::from(args.node_socket) },
     };
 
     io.extend_with(evm_sever.to_delegate());

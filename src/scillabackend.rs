@@ -1,148 +1,96 @@
-use evm::backend::{Backend, Basic};
-use jsonrpc_core_client::{transports::ipc, RpcChannel, RpcError};
-use primitive_types::{H160, H256, U256};
+use std::cell::{Ref, RefCell};
 /// Backend implementation that stores EVM state via the Scilla JSONRPC interface.
-use std::cell::RefCell;
-use std::sync::Arc;
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, MutexGuard};
-use std::ops::DerefMut;
 
+use evm::backend::{Backend, Basic};
+use jsonrpc_core::serde_json;
+use jsonrpc_core::{Params, Value};
+use jsonrpc_core_client::{transports::ipc, RawClient, RpcError};
+use primitive_types::{H160, H256, U256};
+
+pub struct ScillaBackendFactory {
+    pub path: PathBuf,
+}
+
+impl ScillaBackendFactory {
+    pub fn new_backend(&self) -> ScillaBackend {
+        ScillaBackend::new(&self.path)
+    }
+}
 
 // Backend relying on Scilla variables and Scilla JSONRPC interface.
 pub struct ScillaBackend {
     // Path to the Unix domain socket over which we talk to the Node.
     path: PathBuf,
 
-    // Established JSONRPC channel.
-    channel: Arc<Mutex<Option<RpcChannel>>>,
+    // Established JSONRPC client.
+    client: RefCell<Option<RawClient>>,
 }
 
 impl ScillaBackend {
     pub fn new<P: AsRef<Path>>(path: P) -> Self {
         Self {
             path: path.as_ref().to_path_buf(),
-            channel: Arc::new(Mutex::new(None)),
+            client: RefCell::new(None),
         }
     }
 
-    pub fn channel(&self) -> Result<MutexGuard<'_, Option<RpcChannel>>, RpcError> {
-        let mut guard = self.channel.lock().unwrap();
-        if guard.is_none() {
-            let channel = futures::executor::block_on(async {
-                let channel = ipc::connect(&self.path).await?;
-                Result::<RpcChannel, RpcError>::Ok(channel)
-            })?;
-            *guard.deref_mut() = Some(channel);
+    // Create a JSON RPC client to the node, or reuse an existing one.
+    pub fn client(&self) -> Ref<'_, RawClient> {
+        let chan = self.client.borrow();
+        if chan.is_some() {
+            return Ref::map(chan, |x| x.as_ref().unwrap());
         }
-        Ok(guard)
+        let client = futures::executor::block_on(async {
+            let client = ipc::connect(&self.path).await?;
+            Result::<RawClient, RpcError>::Ok(client)
+        })
+        .expect("Node JSONRPC client");
+        *self.client.borrow_mut() = Some(client);
+        Ref::map(self.client.borrow(), |x| x.as_ref().unwrap())
     }
 }
 
-// impl<'config> StackState<'config> for ScillaState {
-//     fn metadata(&self) -> &StackSubstateMetadata<'config>;
-//     fn metadata_mut(&mut self) -> &mut StackSubstateMetadata<'config>;
-
-//     fn enter(&mut self, gas_limit: u64, is_static: bool) {
-//         // TODO
-//     }
-
-//     fn exit_commit(&mut self) -> Result<(), ExitError> {
-//         // TODO
-//         Ok(())
-//     }
-
-//     fn exit_revert(&mut self) -> Result<(), ExitError> {
-//         // TODO
-//         Ok(())
-//     }
-
-//     fn exit_discard(&mut self) -> Result<(), ExitError> {
-//         // TODO
-//         Ok(())
-//     }
-
-//     fn is_empty(&self, address: H160) -> bool {
-//         // TODO
-//         false
-//     }
-
-//     fn deleted(&self, address: H160) -> bool {
-//         // TODO
-//         false
-//     }
-
-//     fn is_cold(&self, address: H160) -> bool {
-//         // TODO
-//         false
-//     }
-
-//     fn is_storage_cold(&self, address: H160, key: H256) -> bool {
-//         // TODO
-//         false
-//     }
-
-//     fn inc_nonce(&mut self, address: H160) {
-//         // TODO
-//     }
-
-//     fn set_storage(&mut self, address: H160, key: H256, value: H256) {
-//         // TODO
-//     }
-
-//     fn reset_storage(&mut self, address: H160) {
-//         // TODO
-//     }
-
-//     fn log(&mut self, address: H160, topics: Vec<H256>, data: Vec<u8>) {
-//         // TODO
-//     }
-
-//     fn set_deleted(&mut self, address: H160) {
-//         // TODO
-//     }
-
-//     fn set_code(&mut self, address: H160, code: Vec<u8>) {
-//         // TODO
-//     }
-
-//     fn transfer(&mut self, transfer: Transfer) -> Result<(), ExitError> {
-//         Ok(())
-//     }
-
-//     fn reset_balance(&mut self, address: H160) {
-//         // TODO
-//     }
-
-//     fn touch(&mut self, address: H160) {
-//         // TODO
-//     }
-// }
+fn query_jsonrpc_u64<T: From<u64>>(client: &RawClient, query_name: &str) -> T {
+        let mut args = serde_json::Map::new();
+        args.insert("query_name".into(), query_name.into());
+        args.insert("query_args".into(), "".into());
+        let result: Value = futures::executor::block_on(async move {
+            client
+                .call_method("fetchBlockchainInfo", Params::Map(args))
+                .await
+        })
+        .expect("fetchBlockchainInfo call");
+        result
+            .get(1)
+            .expect("fetchBlockchainInfo result")
+            .as_u64()
+            .expect("fetchBlockchainInfo BLOCKNUMBER")
+            .into()
+}
 
 impl<'config> Backend for ScillaBackend {
     fn gas_price(&self) -> U256 {
-        U256::zero()
         // self.backend.gas_price()
+        U256::from(2_000_000_000) // see constants.xml in the Zilliqa codebase.
     }
     fn origin(&self) -> H160 {
         H160::zero()
         // self.backend.origin()
     }
-    fn block_hash(&self, number: U256) -> H256 {
+    fn block_hash(&self, _number: U256) -> H256 {
         H256::zero()
         // self.backend.block_hash(number)
     }
     fn block_number(&self) -> U256 {
-        U256::zero()
-        // self.backend.block_number()
+        query_jsonrpc_u64(&self.client(), "BLOCKNUMBER")
     }
     fn block_coinbase(&self) -> H160 {
         H160::zero()
         // self.backend.block_coinbase()
     }
     fn block_timestamp(&self) -> U256 {
-        U256::zero()
-        // self.backend.block_timestamp()
+        query_jsonrpc_u64(&self.client(), "TIMESTAMP")
     }
     fn block_difficulty(&self) -> U256 {
         U256::one()
@@ -158,16 +106,17 @@ impl<'config> Backend for ScillaBackend {
     }
 
     fn chain_id(&self) -> U256 {
-        U256::from(123)
-        // self.backend.chain_id()
+        let base_chain_id = 33000u64;
+        let chain_id: u64 = query_jsonrpc_u64(&self.client(), "CHAINID");
+        (chain_id + base_chain_id).into()
     }
 
-    fn exists(&self, address: H160) -> bool {
+    fn exists(&self, _address: H160) -> bool {
         // self.substate.known_account(address).is_some() || self.backend.exists(address)
         false
     }
 
-    fn basic(&self, address: H160) -> Basic {
+    fn basic(&self, _address: H160) -> Basic {
         // self.substate
         //     .known_basic(address)
         //     .unwrap_or_else(|| self.backend.basic(address))
@@ -177,21 +126,21 @@ impl<'config> Backend for ScillaBackend {
         }
     }
 
-    fn code(&self, address: H160) -> Vec<u8> {
+    fn code(&self, _address: H160) -> Vec<u8> {
         vec![0, 1, 2, 3, 4]
         // self.substate
         //     .known_code(address)
         //     .unwrap_or_else(|| self.backend.code(address))
     }
 
-    fn storage(&self, address: H160, key: H256) -> H256 {
+    fn storage(&self, _address: H160, _key: H256) -> H256 {
         H256::zero()
         // self.substate
         //     .known_storage(address, key)
         //     .unwrap_or_else(|| self.backend.storage(address, key))
     }
 
-    fn original_storage(&self, address: H160, key: H256) -> Option<H256> {
+    fn original_storage(&self, _address: H160, _key: H256) -> Option<H256> {
         Some(H256::zero())
         // if let Some(value) = self.substate.known_original_storage(address, key) {
         //     return Some(value);
