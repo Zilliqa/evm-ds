@@ -52,21 +52,21 @@ impl ScillaBackend {
 }
 
 fn query_jsonrpc_u64<T: From<u64>>(client: &RawClient, query_name: &str) -> T {
-        let mut args = serde_json::Map::new();
-        args.insert("query_name".into(), query_name.into());
-        args.insert("query_args".into(), "".into());
-        let result: Value = futures::executor::block_on(async move {
-            client
-                .call_method("fetchBlockchainInfo", Params::Map(args))
-                .await
-        })
-        .expect("fetchBlockchainInfo call");
-        result
-            .get(1)
-            .expect("fetchBlockchainInfo result")
-            .as_u64()
-            .expect("fetchBlockchainInfo BLOCKNUMBER")
-            .into()
+    let mut args = serde_json::Map::new();
+    args.insert("query_name".into(), query_name.into());
+    args.insert("query_args".into(), "".into());
+    let result: Value = futures::executor::block_on(async move {
+        client
+            .call_method("fetchBlockchainInfo", Params::Map(args))
+            .await
+    })
+    .expect("fetchBlockchainInfo call");
+    result
+        .get(1)
+        .expect("fetchBlockchainInfo result")
+        .as_u64()
+        .expect("fetchBlockchainInfo BLOCKNUMBER")
+        .into()
 }
 
 impl<'config> Backend for ScillaBackend {

@@ -4,8 +4,8 @@
 #![forbid(unsafe_code)]
 
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
-use std::rc::Rc;
 use std::path::PathBuf;
+use std::rc::Rc;
 
 use clap::Parser;
 use evm::executor::stack::{MemoryStackState, StackSubstateMetadata};
@@ -16,7 +16,6 @@ use log::{debug, info};
 
 use jsonrpc_core::{Error, IoHandler, Result};
 use jsonrpc_derive::rpc;
-use jsonrpc_ipc_server;
 use primitive_types::*;
 use scillabackend::ScillaBackendFactory;
 
@@ -82,7 +81,8 @@ impl Rpc for EvmServer {
         let context = evm::Context {
             address: H160::from_str(&address).map_err(|e| Error::invalid_params(e.to_string()))?,
             caller: H160::from_str(&caller).map_err(|e| Error::invalid_params(e.to_string()))?,
-            apparent_value: U256::from_str(&apparent_value).map_err(|e| Error::invalid_params(e.to_string()))?,
+            apparent_value: U256::from_str(&apparent_value)
+                .map_err(|e| Error::invalid_params(e.to_string()))?,
         };
         let mut runtime = evm::Runtime::new(code, data, context, &config);
         let metadata = StackSubstateMetadata::new(GAS_LIMIT, &config);
@@ -139,7 +139,9 @@ fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     // Connect to the backend as needed.
     let evm_sever = EvmServer {
         tracing: args.tracing,
-        backend_factory: ScillaBackendFactory { path: PathBuf::from(args.node_socket) },
+        backend_factory: ScillaBackendFactory {
+            path: PathBuf::from(args.node_socket),
+        },
     };
 
     io.extend_with(evm_sever.to_delegate());
