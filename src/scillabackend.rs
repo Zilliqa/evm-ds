@@ -125,7 +125,7 @@ impl<'config> Backend for ScillaBackend {
     }
 
     fn block_base_fee_per_gas(&self) -> U256 {
-        query_jsonrpc_u64(&self.client(), "BLOCK_BASE_FEE_PER_GAS")
+        self.gas_price()
     }
 
     fn chain_id(&self) -> U256 {
