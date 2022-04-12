@@ -1,4 +1,5 @@
-use std::cell::{Ref, RefCell};
+use std::{cell::{Ref, RefCell}, str::FromStr};
+use std::mem;
 /// Backend implementation that stores EVM state via the Scilla JSONRPC interface.
 use std::path::{Path, PathBuf};
 
@@ -51,58 +52,80 @@ impl ScillaBackend {
     }
 }
 
-fn query_jsonrpc_u64<T: From<u64>>(client: &RawClient, query_name: &str) -> T {
+fn query_jsonrpc(
+    client: &RawClient,
+    query_name: &str,
+    query_args: Option<&str>,
+) -> Value {
+    // Make a JSON Query for fetchBlockchaininfo
     let mut args = serde_json::Map::new();
     args.insert("query_name".into(), query_name.into());
-    args.insert("query_args".into(), "".into());
-    let result: Value = futures::executor::block_on(async move {
+    args.insert("query_args".into(), query_args.unwrap_or_default().into());
+    let mut result: Value = futures::executor::block_on(async move {
         client
             .call_method("fetchBlockchainInfo", Params::Map(args))
             .await
     })
     .expect("fetchBlockchainInfo call");
-    result
-        .get(1)
-        .expect("fetchBlockchainInfo result")
-        .as_u64()
+
+    // Check that the call succeeded.
+    assert_eq!(
+        true,
+        result
+            .get(0)
+            .expect("fetchBlockchainInfo result")
+            .as_bool()
+            .expect("fetchBlockchainInfo result")
+    );
+
+    // Check that there is a result of a given type.
+    let result = result.get_mut(1).expect("fetchBlockchainInfo result");
+    mem::replace(result, Value::default())
+}
+
+fn query_jsonrpc_u64<OutputType: From<u64>>(client: &RawClient, query_name: &str) -> OutputType {
+    serde_json::from_value::<u64>(query_jsonrpc(client, query_name, None))
         .expect("fetchBlockchainInfo BLOCKNUMBER")
         .into()
 }
 
 impl<'config> Backend for ScillaBackend {
     fn gas_price(&self) -> U256 {
-        // self.backend.gas_price()
         U256::from(2_000_000_000) // see constants.xml in the Zilliqa codebase.
     }
+
     fn origin(&self) -> H160 {
-        H160::zero()
-        // self.backend.origin()
+        let result = query_jsonrpc(&self.client(), "ORIGIN", None);
+        H160::from_str(result.as_str().expect("origin")).expect("origin hex")
     }
-    fn block_hash(&self, _number: U256) -> H256 {
-        H256::zero()
-        // self.backend.block_hash(number)
+
+    fn block_hash(&self, number: U256) -> H256 {
+        let result = query_jsonrpc(&self.client(), "BLOCKHASH", Some(&number.to_string()));
+        H256::from_str(result.as_str().expect("blockhash")).expect("blockhash hex")
     }
+
     fn block_number(&self) -> U256 {
         query_jsonrpc_u64(&self.client(), "BLOCKNUMBER")
     }
+
     fn block_coinbase(&self) -> H160 {
         H160::zero()
-        // self.backend.block_coinbase()
     }
+
     fn block_timestamp(&self) -> U256 {
         query_jsonrpc_u64(&self.client(), "TIMESTAMP")
     }
+
     fn block_difficulty(&self) -> U256 {
-        U256::one()
-        // self.backend.block_difficulty()
+        query_jsonrpc_u64(&self.client(), "BLOCKDIFFICULTY")
     }
+
     fn block_gas_limit(&self) -> U256 {
-        U256::one()
-        // self.backend.block_gas_limit()
+        query_jsonrpc_u64(&self.client(), "BLOCKGASLIMIT")
     }
+
     fn block_base_fee_per_gas(&self) -> U256 {
-        U256::one()
-        // self.backend.block_base_fee_per_gas()
+        query_jsonrpc_u64(&self.client(), "BLOCK_BASE_FEE_PER_GAS")
     }
 
     fn chain_id(&self) -> U256 {
