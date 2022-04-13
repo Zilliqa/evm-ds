@@ -1,13 +1,20 @@
-use std::{cell::{Ref, RefCell}, str::FromStr};
 use std::mem;
 /// Backend implementation that stores EVM state via the Scilla JSONRPC interface.
 use std::path::{Path, PathBuf};
+use std::{
+    cell::{Ref, RefCell},
+    str::FromStr,
+};
 
 use evm::backend::{Backend, Basic};
 use jsonrpc_core::serde_json;
 use jsonrpc_core::{Params, Value};
 use jsonrpc_core_client::{transports::ipc, RawClient, RpcError};
 use primitive_types::{H160, H256, U256};
+
+use protobuf::Message;
+
+use crate::protos::ScillaMessage;
 
 pub struct ScillaBackendFactory {
     pub path: PathBuf,
@@ -52,11 +59,7 @@ impl ScillaBackend {
     }
 }
 
-fn query_jsonrpc(
-    client: &RawClient,
-    query_name: &str,
-    query_args: Option<&str>,
-) -> Value {
+fn query_jsonrpc(client: &RawClient, query_name: &str, query_args: Option<&str>) -> Value {
     // Make a JSON Query for fetchBlockchaininfo
     let mut args = serde_json::Map::new();
     args.insert("query_name".into(), query_name.into());
@@ -156,19 +159,48 @@ impl<'config> Backend for ScillaBackend {
         //     .unwrap_or_else(|| self.backend.code(address))
     }
 
-    fn storage(&self, _address: H160, _key: H256) -> H256 {
-        H256::zero()
+    fn storage(&self, address: H160, key: H256) -> H256 {
+        let client = self.client();
+        let mut query = ScillaMessage::ProtoScillaQuery::new();
+        query.set_name("_evm_storage".into());
+        query.set_indices(vec![bytes::Bytes::from(key.as_bytes().to_vec())].into());
+        query.set_mapdepth(1);
+
         // self.substate
         //     .known_storage(address, key)
         //     .unwrap_or_else(|| self.backend.storage(address, key))
+
+        let mut args = serde_json::Map::new();
+        args.insert("addr".into(), hex::encode(address.as_bytes()).into());
+        args.insert("query".into(), query.write_to_bytes().unwrap().into());
+        let mut result: Value = futures::executor::block_on(async move {
+            client
+                .call_method("fetchExternalStateValue", Params::Map(args))
+                .await
+        })
+        .expect("fetchExternalStateValue call");
+
+        // Check that the call succeeded.
+        assert_eq!(
+            true,
+            result
+                .get(0)
+                .expect("fetchExternalStateValue result")
+                .as_bool()
+                .expect("fetchExternalStateValue result")
+        );
+
+        // Check that there is a result of a given type.
+        let result = result.get_mut(1).expect("fetchExternalStateValue result");
+        let result = mem::replace(result, Value::default());
+        let result = result.as_str().expect("fetchExternalStateValue string");
+        let result = hex::decode(result).expect("fetchExternalStateValue hex");
+        H256::from_slice(&result)
     }
 
-    fn original_storage(&self, _address: H160, _key: H256) -> Option<H256> {
-        Some(H256::zero())
-        // if let Some(value) = self.substate.known_original_storage(address, key) {
-        //     return Some(value);
-        // }
-
-        // self.backend.original_storage(address, key)
+    // We implement original_storage via storage, as we postpone writes until
+    // contract commit time.
+    fn original_storage(&self, address: H160, key: H256) -> Option<H256> {
+        Some(self.storage(address, key))
     }
 }

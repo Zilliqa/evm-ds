@@ -3,6 +3,9 @@
 // #![deny(warnings)]
 #![forbid(unsafe_code)]
 
+mod protos;
+mod scillabackend;
+
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::PathBuf;
 use std::rc::Rc;
@@ -18,8 +21,6 @@ use jsonrpc_core::{Error, IoHandler, Result};
 use jsonrpc_derive::rpc;
 use primitive_types::*;
 use scillabackend::ScillaBackendFactory;
-
-mod scillabackend;
 
 /// EVM JSON-RPC server
 #[derive(Parser, Debug)]
