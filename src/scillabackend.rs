@@ -44,7 +44,7 @@ impl ScillaBackend {
     }
 
     // Create a JSON RPC client to the node, or reuse an existing one.
-    pub fn client(&self) -> Ref<'_, RawClient> {
+    fn client(&self) -> Ref<'_, RawClient> {
         let chan = self.client.borrow();
         if chan.is_some() {
             return Ref::map(chan, |x| x.as_ref().unwrap());
@@ -57,39 +57,38 @@ impl ScillaBackend {
         *self.client.borrow_mut() = Some(client);
         Ref::map(self.client.borrow(), |x| x.as_ref().unwrap())
     }
-}
 
-fn query_jsonrpc(client: &RawClient, query_name: &str, query_args: Option<&str>) -> Value {
-    // Make a JSON Query for fetchBlockchaininfo
-    let mut args = serde_json::Map::new();
-    args.insert("query_name".into(), query_name.into());
-    args.insert("query_args".into(), query_args.unwrap_or_default().into());
-    let mut result: Value = futures::executor::block_on(async move {
-        client
-            .call_method("fetchBlockchainInfo", Params::Map(args))
-            .await
-    })
-    .expect("fetchBlockchainInfo call");
+    // Call the Scilla IPC Server API.
+    fn call_ipc_server_api(&self, method: &str, args: serde_json::Map<String, Value>) -> Value {
+        futures::executor::block_on(async move {
+            self.client().call_method(method, Params::Map(args)).await
+        })
+        .expect(&format!("{} call", method))
+    }
 
-    // Check that the call succeeded.
-    assert_eq!(
-        true,
-        result
+    fn query_jsonrpc(&self, query_name: &str, query_args: Option<&str>) -> Value {
+        // Make a JSON Query for fetchBlockchaininfo
+        let mut args = serde_json::Map::new();
+        args.insert("query_name".into(), query_name.into());
+        args.insert("query_args".into(), query_args.unwrap_or_default().into());
+        let mut result = self.call_ipc_server_api("fetchBlockchainInfo", args);
+        // Check that the call succeeded.
+        assert!(result
             .get(0)
             .expect("fetchBlockchainInfo result")
             .as_bool()
-            .expect("fetchBlockchainInfo result")
-    );
+            .expect("fetchBlockchainInfo result"));
 
-    // Check that there is a result of a given type.
-    let result = result.get_mut(1).expect("fetchBlockchainInfo result");
-    mem::replace(result, Value::default())
-}
+        // Check that there is a result of a given type.
+        let result = result.get_mut(1).expect("fetchBlockchainInfo result");
+        mem::take(result)
+    }
 
-fn query_jsonrpc_u64<OutputType: From<u64>>(client: &RawClient, query_name: &str) -> OutputType {
-    serde_json::from_value::<u64>(query_jsonrpc(client, query_name, None))
-        .expect("fetchBlockchainInfo BLOCKNUMBER")
-        .into()
+    fn query_jsonrpc_u64<OutputType: From<u64>>(&self, query_name: &str) -> OutputType {
+        serde_json::from_value::<u64>(self.query_jsonrpc(query_name, None))
+            .expect("fetchBlockchainInfo BLOCKNUMBER")
+            .into()
+    }
 }
 
 impl<'config> Backend for ScillaBackend {
@@ -98,17 +97,17 @@ impl<'config> Backend for ScillaBackend {
     }
 
     fn origin(&self) -> H160 {
-        let result = query_jsonrpc(&self.client(), "ORIGIN", None);
+        let result = self.query_jsonrpc("ORIGIN", None);
         H160::from_str(result.as_str().expect("origin")).expect("origin hex")
     }
 
     fn block_hash(&self, number: U256) -> H256 {
-        let result = query_jsonrpc(&self.client(), "BLOCKHASH", Some(&number.to_string()));
+        let result = self.query_jsonrpc("BLOCKHASH", Some(&number.to_string()));
         H256::from_str(result.as_str().expect("blockhash")).expect("blockhash hex")
     }
 
     fn block_number(&self) -> U256 {
-        query_jsonrpc_u64(&self.client(), "BLOCKNUMBER")
+        self.query_jsonrpc_u64("BLOCKNUMBER")
     }
 
     fn block_coinbase(&self) -> H160 {
@@ -116,15 +115,15 @@ impl<'config> Backend for ScillaBackend {
     }
 
     fn block_timestamp(&self) -> U256 {
-        query_jsonrpc_u64(&self.client(), "TIMESTAMP")
+        self.query_jsonrpc_u64("TIMESTAMP")
     }
 
     fn block_difficulty(&self) -> U256 {
-        query_jsonrpc_u64(&self.client(), "BLOCKDIFFICULTY")
+        self.query_jsonrpc_u64("BLOCKDIFFICULTY")
     }
 
     fn block_gas_limit(&self) -> U256 {
-        query_jsonrpc_u64(&self.client(), "BLOCKGASLIMIT")
+        self.query_jsonrpc_u64("BLOCKGASLIMIT")
     }
 
     fn block_base_fee_per_gas(&self) -> U256 {
@@ -133,7 +132,7 @@ impl<'config> Backend for ScillaBackend {
 
     fn chain_id(&self) -> U256 {
         let base_chain_id = 33000u64;
-        let chain_id: u64 = query_jsonrpc_u64(&self.client(), "CHAINID");
+        let chain_id: u64 = self.query_jsonrpc_u64("CHAINID");
         (chain_id + base_chain_id).into()
     }
 
@@ -152,49 +151,62 @@ impl<'config> Backend for ScillaBackend {
         }
     }
 
-    fn code(&self, _address: H160) -> Vec<u8> {
-        vec![0, 1, 2, 3, 4]
-        // self.substate
-        //     .known_code(address)
-        //     .unwrap_or_else(|| self.backend.code(address))
-    }
-
-    fn storage(&self, address: H160, key: H256) -> H256 {
-        let client = self.client();
+    fn code(&self, address: H160) -> Vec<u8> {
         let mut query = ScillaMessage::ProtoScillaQuery::new();
-        query.set_name("_evm_storage".into());
-        query.set_indices(vec![bytes::Bytes::from(key.as_bytes().to_vec())].into());
-        query.set_mapdepth(1);
-
-        // self.substate
-        //     .known_storage(address, key)
-        //     .unwrap_or_else(|| self.backend.storage(address, key))
+        query.set_name("_code".into());
+        query.set_mapdepth(0);
 
         let mut args = serde_json::Map::new();
         args.insert("addr".into(), hex::encode(address.as_bytes()).into());
         args.insert("query".into(), query.write_to_bytes().unwrap().into());
-        let mut result: Value = futures::executor::block_on(async move {
-            client
-                .call_method("fetchExternalStateValue", Params::Map(args))
-                .await
-        })
-        .expect("fetchExternalStateValue call");
 
-        // Check that the call succeeded.
-        assert_eq!(
-            true,
-            result
-                .get(0)
-                .expect("fetchExternalStateValue result")
-                .as_bool()
-                .expect("fetchExternalStateValue result")
-        );
+        // If the RPC call failed, something is wrong, and it is better to crash.
+        let mut result = self.call_ipc_server_api("fetchExternalStateValue", args);
+        // If the RPC was okay, but we didn't get a value, that's
+        // normal, just return empty code.
+        if !result
+            .get(0)
+            .map(|x| x.as_bool().unwrap_or_default())
+            .unwrap_or_default()
+        {
+            return Vec::new();
+        }
+        // Check that there is a result of a given type.
+        let mut default_value = Value::String("".into());
+        let result = result.get_mut(1).unwrap_or(&mut default_value);
+        let result = mem::take(result);
+        let result = result.as_str().unwrap_or("").to_string();
+        result.into_bytes()
+    }
+
+    fn storage(&self, address: H160, key: H256) -> H256 {
+        let mut query = ScillaMessage::ProtoScillaQuery::new();
+        query.set_name("_evm_storage".into());
+        query.set_indices(vec![bytes::Bytes::from(key.as_bytes().to_vec())]);
+        query.set_mapdepth(1);
+
+        let mut args = serde_json::Map::new();
+        args.insert("addr".into(), hex::encode(address.as_bytes()).into());
+        args.insert("query".into(), query.write_to_bytes().unwrap().into());
+
+        // If the RPC call failed, something is wrong, and it is better to crash.
+        let mut result = self.call_ipc_server_api("fetchExternalStateValue", args);
+        // If the RPC was okay, but we didn't get a value, that's
+        // normal, just return zero.
+        if !result
+            .get(0)
+            .map(|x| x.as_bool().unwrap_or_default())
+            .unwrap_or_default()
+        {
+            return H256::zero();
+        }
 
         // Check that there is a result of a given type.
-        let result = result.get_mut(1).expect("fetchExternalStateValue result");
-        let result = mem::replace(result, Value::default());
-        let result = result.as_str().expect("fetchExternalStateValue string");
-        let result = hex::decode(result).expect("fetchExternalStateValue hex");
+        let mut default_value = Value::String("0".to_string());
+        let result = result.get_mut(1).unwrap_or(&mut default_value);
+        let result = mem::take(result);
+        let result = result.as_str().unwrap_or("0");
+        let result = hex::decode(result).unwrap_or(vec![0u8]);
         H256::from_slice(&result)
     }
 
