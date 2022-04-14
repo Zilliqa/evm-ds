@@ -6,18 +6,21 @@
 mod protos;
 mod scillabackend;
 
-use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::{net::{IpAddr, Ipv4Addr, SocketAddr}};
+use std::panic::{self, AssertUnwindSafe};
 use std::path::PathBuf;
 use std::rc::Rc;
 
 use clap::Parser;
-use evm::executor::stack::{MemoryStackState, StackSubstateMetadata};
 use evm::tracing;
+use evm::{
+    executor::stack::{MemoryStackState, StackSubstateMetadata},
+};
 
 use core::str::FromStr;
 use log::{debug, info};
 
-use jsonrpc_core::{Error, IoHandler, Result};
+use jsonrpc_core::{Error, ErrorCode, IoHandler, Result};
 use jsonrpc_derive::rpc;
 use primitive_types::*;
 use scillabackend::ScillaBackendFactory;
@@ -101,13 +104,30 @@ impl Rpc for EvmServer {
             code_hex, data_hex,
         );
         let mut listener = LoggingEventListener;
-        let exit_reason = if self.tracing {
-            evm::tracing::using(&mut listener, || executor.execute(&mut runtime))
-        } else {
-            executor.execute(&mut runtime)
-        };
-        info!("Exit: {:?}", exit_reason);
-        Ok(exit_reason)
+
+        // We have to catch panics, as error handling in the Backend interface of
+        // do not have Result, assuming all operations are successful.
+        //
+        // We are asserting it is safe to unwind, as objects will be dropped after
+        // the unwind.
+        let result = panic::catch_unwind(AssertUnwindSafe(|| {
+            if self.tracing {
+                evm::tracing::using(&mut listener, || executor.execute(&mut runtime))
+            } else {
+                executor.execute(&mut runtime)
+            }
+        }));
+        match result {
+            Ok(exit_reason) => {
+                info!("Exit: {:?}", exit_reason);
+                Ok(exit_reason)
+            }
+            Err(_) => Err(Error {
+                code: ErrorCode::InternalError,
+                message: "EVM execution failed".to_string(),
+                data: None,
+            }),
+        }
     }
 }
 
