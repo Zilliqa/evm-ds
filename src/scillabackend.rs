@@ -8,7 +8,7 @@ use std::{
 
 use evm::backend::{Backend, Basic};
 use jsonrpc_core::serde_json;
-use jsonrpc_core::{Params, Value};
+use jsonrpc_core::{Error, Params, Result, Value};
 use jsonrpc_core_client::{transports::ipc, RawClient, RpcError};
 use primitive_types::{H160, H256, U256};
 
@@ -51,7 +51,7 @@ impl ScillaBackend {
         }
         let client = futures::executor::block_on(async {
             let client = ipc::connect(&self.path).await?;
-            Result::<RawClient, RpcError>::Ok(client)
+            std::result::Result::<RawClient, RpcError>::Ok(client)
         })
         .expect("Node JSONRPC client");
         *self.client.borrow_mut() = Some(client);
@@ -63,7 +63,7 @@ impl ScillaBackend {
         futures::executor::block_on(async move {
             self.client().call_method(method, Params::Map(args)).await
         })
-        .expect(&format!("{} call", method))
+        .unwrap_or_else(|_| panic!("{} call", method))
     }
 
     fn query_jsonrpc(&self, query_name: &str, query_args: Option<&str>) -> Value {
@@ -88,6 +88,63 @@ impl ScillaBackend {
         serde_json::from_value::<u64>(self.query_jsonrpc(query_name, None))
             .expect("fetchBlockchainInfo BLOCKNUMBER")
             .into()
+    }
+
+    fn query_state_value(
+        &self,
+        address: H160,
+        query_name: &str,
+        key: Option<H256>,
+        use_default: bool,
+    ) -> Result<Option<Value>> {
+        let mut query = ScillaMessage::ProtoScillaQuery::new();
+        query.set_name(query_name.into());
+        if let Some(key) = key {
+            query.set_indices(vec![bytes::Bytes::from(key.as_bytes().to_vec())]);
+            query.set_mapdepth(1);
+        } else {
+            query.set_mapdepth(0);
+        }
+
+        let mut args = serde_json::Map::new();
+        args.insert("addr".into(), hex::encode(address.as_bytes()).into());
+        args.insert("query".into(), query.write_to_bytes().unwrap().into());
+
+        // If the RPC call failed, something is wrong, and it is better to crash.
+        let mut result = self.call_ipc_server_api("fetchExternalStateValue", args);
+        // If the RPC was okay, but we didn't get a value, that's
+        // normal, just return empty code.
+        let default_false = Value::Bool(false);
+        if !result
+            .get(0)
+            .map_or_else(
+                || {
+                    if use_default {
+                        Ok(&default_false)
+                    } else {
+                        Err(Error::internal_error())
+                    }
+                },
+                Ok,
+            )?
+            .as_bool()
+            .unwrap_or_default()
+        {
+            return Ok(None);
+        }
+        // Check that there is a result of a given type.
+        let mut default_value = Value::String("".into());
+        let result = result.get_mut(1).map_or_else(
+            || {
+                if use_default {
+                    Ok(&mut default_value)
+                } else {
+                    Err(Error::internal_error())
+                }
+            },
+            Ok,
+        )?;
+        Ok(Some(mem::take(result)))
     }
 }
 
@@ -141,72 +198,38 @@ impl<'config> Backend for ScillaBackend {
         false
     }
 
-    fn basic(&self, _address: H160) -> Basic {
-        // self.substate
-        //     .known_basic(address)
-        //     .unwrap_or_else(|| self.backend.basic(address))
-        Basic {
-            balance: U256::zero(),
-            nonce: U256::zero(),
-        }
+    fn basic(&self, address: H160) -> Basic {
+        let result = self
+            .query_state_value(address, "_balance", None, false)
+            .expect("query_state_value")
+            .map(|x| x.as_u64().expect("balance as number"))
+            .unwrap_or(0);
+        let balance = U256::from(result);
+        let result = self
+            .query_state_value(address, "_nonce", None, false)
+            .expect("query_state_value")
+            .map(|x| x.as_u64().expect("nonce as number"))
+            .unwrap_or(0);
+        let nonce = U256::from(result);
+        Basic { balance, nonce }
     }
 
     fn code(&self, address: H160) -> Vec<u8> {
-        let mut query = ScillaMessage::ProtoScillaQuery::new();
-        query.set_name("_code".into());
-        query.set_mapdepth(0);
-
-        let mut args = serde_json::Map::new();
-        args.insert("addr".into(), hex::encode(address.as_bytes()).into());
-        args.insert("query".into(), query.write_to_bytes().unwrap().into());
-
-        // If the RPC call failed, something is wrong, and it is better to crash.
-        let mut result = self.call_ipc_server_api("fetchExternalStateValue", args);
-        // If the RPC was okay, but we didn't get a value, that's
-        // normal, just return empty code.
-        if !result
-            .get(0)
-            .map(|x| x.as_bool().unwrap_or_default())
-            .unwrap_or_default()
-        {
-            return Vec::new();
-        }
-        // Check that there is a result of a given type.
-        let mut default_value = Value::String("".into());
-        let result = result.get_mut(1).unwrap_or(&mut default_value);
-        let result = mem::take(result);
-        let result = result.as_str().unwrap_or("").to_string();
-        result.into_bytes()
+        self.query_state_value(address, "_code", None, true)
+            .expect("query_state_value(_code)")
+            .expect("query_state_value(_code) result")
+            .as_str()
+            .unwrap_or("")
+            .to_string()
+            .into_bytes()
     }
 
     fn storage(&self, address: H160, key: H256) -> H256 {
-        let mut query = ScillaMessage::ProtoScillaQuery::new();
-        query.set_name("_evm_storage".into());
-        query.set_indices(vec![bytes::Bytes::from(key.as_bytes().to_vec())]);
-        query.set_mapdepth(1);
-
-        let mut args = serde_json::Map::new();
-        args.insert("addr".into(), hex::encode(address.as_bytes()).into());
-        args.insert("query".into(), query.write_to_bytes().unwrap().into());
-
-        // If the RPC call failed, something is wrong, and it is better to crash.
-        let mut result = self.call_ipc_server_api("fetchExternalStateValue", args);
-        // If the RPC was okay, but we didn't get a value, that's
-        // normal, just return zero.
-        if !result
-            .get(0)
-            .map(|x| x.as_bool().unwrap_or_default())
-            .unwrap_or_default()
-        {
-            return H256::zero();
-        }
-
-        // Check that there is a result of a given type.
-        let mut default_value = Value::String("0".to_string());
-        let result = result.get_mut(1).unwrap_or(&mut default_value);
-        let result = mem::take(result);
+        let result = self.query_state_value(address, "_evm_storage", Some(key), true)
+            .expect("query_state_value(_evm_storage)")
+            .expect("query_state_value(_evm_storage) result");
         let result = result.as_str().unwrap_or("0");
-        let result = hex::decode(result).unwrap_or(vec![0u8]);
+        let result = hex::decode(result).unwrap_or_else(|_| vec![0u8]);
         H256::from_slice(&result)
     }
 
