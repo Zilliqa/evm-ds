@@ -309,6 +309,7 @@ dependencies = [
  "bytes",
  "clap",
  "env_logger",
+ "ethereum",
  "evm",
  "futures 0.3.21",
  "hex",

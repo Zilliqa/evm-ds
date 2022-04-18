@@ -120,6 +120,14 @@ impl Rpc for EvmServer {
         match result {
             Ok(exit_reason) => {
                 info!("Exit: {:?}", exit_reason);
+
+                let (state_apply, log) = executor.into_state().deconstruct();
+                for apply in state_apply {
+                    backend.apply(apply);
+                }
+                for log_entry in log {
+                    backend.log(log_entry);
+                }
                 Ok(exit_reason)
             }
             Err(_) => Err(Error {

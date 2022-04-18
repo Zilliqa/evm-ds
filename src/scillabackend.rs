@@ -6,7 +6,7 @@ use std::{
     str::FromStr,
 };
 
-use evm::backend::{Backend, Basic};
+use evm::backend::{Apply, Backend, Basic};
 use jsonrpc_core::serde_json;
 use jsonrpc_core::{Error, Params, Result, Value};
 use jsonrpc_core_client::{transports::ipc, RawClient, RpcError};
@@ -148,6 +148,41 @@ impl ScillaBackend {
         )?;
         Ok(Some(mem::take(result)))
     }
+
+    fn update_state_value<T: Into<Value>, U: Into<Value>>(&self, address: H160, query: T, value: U) -> Result<()> {
+        let mut args = serde_json::Map::new();
+        args.insert("addr".into(), hex::encode(address.as_bytes()).into());
+        args.insert("query".into(), query.into());
+        args.insert("value".into(), value.into());
+        let _ = self.call_ipc_server_api("updateExternalStateValue", args);
+        Ok(())
+    }
+
+    pub fn apply<I>(&self, apply: Apply<I>) {
+        match apply {
+            Apply::Modify {
+                address,
+                basic,
+                code,
+                storage,
+                reset_storage,
+            } => {
+                // Perform the requested modification.
+            }
+            Apply::Delete { address } => {
+                // Delete this address from the contract storage.
+                // TODO: this has to be supported on the C++ side.
+                let mut query = ScillaMessage::ProtoScillaQuery::new();
+                query.set_ignoreval(true);
+                query.set_name("_evm_storage".into());
+                query.set_mapdepth(0);
+                query.set_indices(vec![]);
+                let _ = self.update_state_value(address, query.write_to_bytes().unwrap(), "");
+            }
+        }
+    }
+
+    pub fn log(&self, log: ethereum::Log) {}
 }
 
 impl<'config> Backend for ScillaBackend {
