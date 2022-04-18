@@ -16,6 +16,8 @@ use protobuf::Message;
 
 use crate::protos::ScillaMessage;
 
+const BASE_CHAIN_ID: u64 = 33000;
+
 pub struct ScillaBackendFactory {
     pub path: PathBuf,
 }
@@ -168,6 +170,7 @@ impl<'config> Backend for ScillaBackend {
     }
 
     fn block_coinbase(&self) -> H160 {
+        // TODO: implement according to the logic of Zilliqa.
         H160::zero()
     }
 
@@ -188,26 +191,27 @@ impl<'config> Backend for ScillaBackend {
     }
 
     fn chain_id(&self) -> U256 {
-        let base_chain_id = 33000u64;
         let chain_id: u64 = self.query_jsonrpc_u64("CHAINID");
-        (chain_id + base_chain_id).into()
+        (chain_id + BASE_CHAIN_ID).into()
     }
 
-    fn exists(&self, _address: H160) -> bool {
-        // self.substate.known_account(address).is_some() || self.backend.exists(address)
-        false
+    fn exists(&self, address: H160) -> bool {
+        // Try to query account balance, and see if it returns Some result.
+        self.query_state_value(address, "_balance", None, true)
+            .expect("query_state_value _balance")
+            .is_some()
     }
 
     fn basic(&self, address: H160) -> Basic {
         let result = self
-            .query_state_value(address, "_balance", None, false)
-            .expect("query_state_value")
+            .query_state_value(address, "_balance", None, true)
+            .expect("query_state_value _balance")
             .map(|x| x.as_u64().expect("balance as number"))
             .unwrap_or(0);
         let balance = U256::from(result);
         let result = self
             .query_state_value(address, "_nonce", None, false)
-            .expect("query_state_value")
+            .expect("query_state_value _nonce")
             .map(|x| x.as_u64().expect("nonce as number"))
             .unwrap_or(0);
         let nonce = U256::from(result);
@@ -225,7 +229,8 @@ impl<'config> Backend for ScillaBackend {
     }
 
     fn storage(&self, address: H160, key: H256) -> H256 {
-        let result = self.query_state_value(address, "_evm_storage", Some(key), true)
+        let result = self
+            .query_state_value(address, "_evm_storage", Some(key), true)
             .expect("query_state_value(_evm_storage)")
             .expect("query_state_value(_evm_storage) result");
         let result = result.as_str().unwrap_or("0");
