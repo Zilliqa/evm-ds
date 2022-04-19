@@ -35,6 +35,9 @@ pub struct ScillaBackend {
 
     // Established JSONRPC client.
     client: RefCell<Option<RawClient>>,
+
+    // Logs collected to return
+    
 }
 
 impl ScillaBackend {
@@ -149,7 +152,11 @@ impl ScillaBackend {
         Ok(Some(mem::take(result)))
     }
 
-    fn update_state_value<T: Into<Value>, U: Into<Value>>(&self, address: H160, query: T, value: U) -> Result<()> {
+    fn update_state_value<Q, V>(&self, address: H160, query: Q, value: V) -> Result<()>
+    where
+        Q: Into<Value>,
+        V: Into<Value>,
+    {
         let mut args = serde_json::Map::new();
         args.insert("addr".into(), hex::encode(address.as_bytes()).into());
         args.insert("query".into(), query.into());
@@ -158,7 +165,7 @@ impl ScillaBackend {
         Ok(())
     }
 
-    pub fn apply<I>(&self, apply: Apply<I>) {
+    pub fn apply<I: IntoIterator<Item = (H256, H256)>>(&self, apply: Apply<I>) {
         match apply {
             Apply::Modify {
                 address,
@@ -167,22 +174,61 @@ impl ScillaBackend {
                 storage,
                 reset_storage,
             } => {
-                // Perform the requested modification.
+                // Perform the requested modifications.
+                // First, reset storage if requested.
+                if reset_storage {
+                    let mut query = ScillaMessage::ProtoScillaQuery::new();
+                    query.set_name("_evm_storage".into());
+                    query.set_ignoreval(true);
+                    let _ = self.update_state_value(address, query.write_to_bytes().unwrap(), "");
+                }
+                // Perform the requested storage modifications.
+                for (key, value) in storage {
+                    let mut query = ScillaMessage::ProtoScillaQuery::new();
+                    query.set_name("_evm_storage".into());
+                    query.set_indices(vec![bytes::Bytes::from(key.as_bytes().to_vec())]);
+                    query.set_mapdepth(1);
+                    let mut values = ScillaMessage::ProtoScillaVal::new();
+                    values.set_bval(bytes::Bytes::from(value.as_bytes().to_vec()));
+                    let _ = self.update_state_value(address, values.write_to_bytes().unwrap(), "");
+                }
+                // Set the new contract code if needed.
+                if let Some(code) = code {
+                    let mut query = ScillaMessage::ProtoScillaQuery::new();
+                    query.set_name("_code".into());
+                    let mut values = ScillaMessage::ProtoScillaVal::new();
+                    values.set_bval(bytes::Bytes::from(code.to_vec()));
+                    let _ = self.update_state_value(address, values.write_to_bytes().unwrap(), "");
+                }
+                // Set account balance.
+                let mut query = ScillaMessage::ProtoScillaQuery::new();
+                query.set_name("_balance".into());
+                let mut values = ScillaMessage::ProtoScillaVal::new();
+                let mut val = bytes::BytesMut::with_capacity(32);
+                basic.balance.to_little_endian(&mut val);
+                values.set_bval(val.freeze());
+                let _ = self.update_state_value(address, values.write_to_bytes().unwrap(), "");
+                // Set account nonce.
+                let mut query = ScillaMessage::ProtoScillaQuery::new();
+                query.set_name("_nonce".into());
+                let mut values = ScillaMessage::ProtoScillaVal::new();
+                let mut val = bytes::BytesMut::with_capacity(32);
+                basic.balance.to_little_endian(&mut val);
+                values.set_bval(val.freeze());
+                let _ = self.update_state_value(address, values.write_to_bytes().unwrap(), "");
             }
             Apply::Delete { address } => {
                 // Delete this address from the contract storage.
                 // TODO: this has to be supported on the C++ side.
+                // TODO: likely we should have a separate method JSONRPC to delete accounts.
                 let mut query = ScillaMessage::ProtoScillaQuery::new();
                 query.set_ignoreval(true);
-                query.set_name("_evm_storage".into());
-                query.set_mapdepth(0);
-                query.set_indices(vec![]);
+                query.set_name("_account_delete".into());
                 let _ = self.update_state_value(address, query.write_to_bytes().unwrap(), "");
             }
         }
     }
 
-    pub fn log(&self, log: ethereum::Log) {}
 }
 
 impl<'config> Backend for ScillaBackend {

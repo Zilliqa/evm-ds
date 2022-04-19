@@ -56,7 +56,7 @@ pub trait Rpc {
         code: String,
         data: String,
         apparent_value: String,
-    ) -> Result<evm::ExitReason>;
+    ) -> Result<(evm::ExitReason, Vec<ethereum::Log>)>;
 }
 
 pub struct EvmServer {
@@ -75,7 +75,7 @@ impl Rpc for EvmServer {
         code_hex: String,
         data_hex: String,
         apparent_value: String,
-    ) -> Result<evm::ExitReason> {
+    ) -> Result<(evm::ExitReason, Vec<ethereum::Log>)> {
         let code =
             Rc::new(hex::decode(&code_hex).map_err(|e| Error::invalid_params(e.to_string()))?);
         let data =
@@ -121,14 +121,11 @@ impl Rpc for EvmServer {
             Ok(exit_reason) => {
                 info!("Exit: {:?}", exit_reason);
 
-                let (state_apply, log) = executor.into_state().deconstruct();
+                let (state_apply, logs) = executor.into_state().deconstruct();
                 for apply in state_apply {
                     backend.apply(apply);
                 }
-                for log_entry in log {
-                    backend.log(log_entry);
-                }
-                Ok(exit_reason)
+                Ok((exit_reason, logs.into_iter().collect()))
             }
             Err(_) => Err(Error {
                 code: ErrorCode::InternalError,
