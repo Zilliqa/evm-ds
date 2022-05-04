@@ -39,7 +39,8 @@ Returns: a dictionary of the form:
     "exit_reason": { "Succeed": "Stopped" },
     "return_value": "48656c6c6f20776f726c6421",      // some string hex value.
     "apply": [ {"A": "modify", "address": "<address>", "balance": 12345, "nonce": 2,
-                "code": "608060405234801561001057600080fd5b50600436106100415", // new EVM code for address            "storage": [["<key in hex>", "<value in hex>"], ["<key in hex>", "<value in hex>"] ... ],
+                "code": "608060405234801561001057600080fd5b50600436106100415", // new EVM code for address
+                "storage": [["<key in hex>", "<value in hex>"], ["<key in hex>", "<value in hex>"] ... ],
                 "reset_storage": false,  // whether to wipe the account storage before appying changes.
                 },
                ...
