@@ -40,7 +40,7 @@ struct Args {
     #[clap(short, long, default_value = "/tmp/zilliqa.sock")]
     node_socket: String,
 
-    /// Path of the EVM server Unix domain socket.
+    /// Path of the EVM server HTTP socket. Duplicates the `socket` above for convenience.
     #[clap(short = 'p', long, default_value = "3333")]
     http_port: u16,
 
