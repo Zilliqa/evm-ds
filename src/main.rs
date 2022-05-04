@@ -6,16 +6,19 @@
 mod protos;
 mod scillabackend;
 
-use std::{net::{IpAddr, Ipv4Addr, SocketAddr}};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::panic::{self, AssertUnwindSafe};
 use std::path::PathBuf;
 use std::rc::Rc;
 
 use clap::Parser;
-use evm::tracing;
 use evm::{
+    backend::Apply,
     executor::stack::{MemoryStackState, StackSubstateMetadata},
+    tracing,
 };
+
+use serde::ser::{Serialize, Serializer, SerializeStructVariant};
 
 use core::str::FromStr;
 use log::{debug, info};
@@ -46,6 +49,47 @@ struct Args {
     tracing: bool,
 }
 
+struct DirtyState(Apply<Vec<(H256, H256)>>);
+
+impl Serialize for DirtyState {
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        match &self.0 {
+            Apply::Modify {
+                ref address,
+                ref basic,
+                ref code,
+                ref storage,
+                reset_storage,
+            } => {
+                let mut state = serializer.serialize_struct_variant("A", 0, "modify", 6)?;
+                state.serialize_field("address", address)?;
+                state.serialize_field("balance", &basic.balance)?;
+                state.serialize_field("nonce", &basic.nonce)?;
+                state.serialize_field("code", code)?;
+                state.serialize_field("storage", storage)?;
+                state.serialize_field("reset_storage", &reset_storage)?;
+                Ok(state.end()?)
+            }
+            Apply::Delete { address } => {
+                let mut state = serializer.serialize_struct_variant("A", 0, "delete", 1)?;
+                state.serialize_field("address", address)?;
+                Ok(state.end()?)
+            }
+        }
+    }
+}
+
+#[derive(serde::Serialize)]
+pub struct EvmResult {
+    exit_reason: evm::ExitReason,
+    return_value: Vec<u8>,
+    apply: Vec<DirtyState>,
+    logs: Vec<ethereum::Log>,
+}
+
 #[rpc(server)]
 pub trait Rpc {
     #[rpc(name = "run")]
@@ -56,10 +100,10 @@ pub trait Rpc {
         code: String,
         data: String,
         apparent_value: String,
-    ) -> Result<(evm::ExitReason, Vec<ethereum::Log>)>;
+    ) -> Result<EvmResult>;
 }
 
-pub struct EvmServer {
+struct EvmServer {
     tracing: bool,
     backend_factory: ScillaBackendFactory,
 }
@@ -75,7 +119,7 @@ impl Rpc for EvmServer {
         code_hex: String,
         data_hex: String,
         apparent_value: String,
-    ) -> Result<(evm::ExitReason, Vec<ethereum::Log>)> {
+    ) -> Result<EvmResult> {
         let code =
             Rc::new(hex::decode(&code_hex).map_err(|e| Error::invalid_params(e.to_string()))?);
         let data =
@@ -122,10 +166,31 @@ impl Rpc for EvmServer {
                 info!("Exit: {:?}", exit_reason);
 
                 let (state_apply, logs) = executor.into_state().deconstruct();
-                for apply in state_apply {
-                    backend.apply(apply);
-                }
-                Ok((exit_reason, logs.into_iter().collect()))
+                Ok(EvmResult {
+                    exit_reason,
+                    return_value: runtime.machine().return_value(),
+                    apply: 
+                        state_apply
+                            .into_iter()
+                            .map(|apply| match apply {
+                                Apply::Delete { address } => DirtyState(Apply::Delete { address }),
+                                Apply::Modify {
+                                    address,
+                                    basic,
+                                    code,
+                                    storage,
+                                    reset_storage,
+                                } => DirtyState(Apply::Modify {
+                                    address,
+                                    basic,
+                                    code,
+                                    storage: storage.into_iter().collect(),
+                                    reset_storage,
+                                }),
+                            })
+                            .collect(),
+                    logs: logs.into_iter().collect(),
+                })
             }
             Err(_) => Err(Error {
                 code: ErrorCode::InternalError,
