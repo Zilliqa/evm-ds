@@ -85,7 +85,7 @@ impl Serialize for DirtyState {
 #[derive(serde::Serialize)]
 pub struct EvmResult {
     exit_reason: evm::ExitReason,
-    return_value: Vec<u8>,
+    return_value: String,
     apply: Vec<DirtyState>,
     logs: Vec<ethereum::Log>,
 }
@@ -168,7 +168,7 @@ impl Rpc for EvmServer {
                 let (state_apply, logs) = executor.into_state().deconstruct();
                 Ok(EvmResult {
                     exit_reason,
-                    return_value: runtime.machine().return_value(),
+                    return_value: hex::encode(runtime.machine().return_value()),
                     apply: 
                         state_apply
                             .into_iter()

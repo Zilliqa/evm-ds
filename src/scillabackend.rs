@@ -65,8 +65,9 @@ impl ScillaBackend {
 
     // Call the Scilla IPC Server API.
     fn call_ipc_server_api(&self, method: &str, args: serde_json::Map<String, Value>) -> Value {
+        let client = self.client();
         futures::executor::block_on(async move {
-            self.client().call_method(method, Params::Map(args)).await
+            client.call_method(method, Params::Map(args)).await
         })
         .unwrap_or_else(|_| panic!("{} call", method))
     }

@@ -28,3 +28,34 @@ Arguments:
   * `--tracing`: if true, additional trace logging will be enabled.
   
 
+## JSON-RPC methods
+
+  * `EvmResult run(string address, string caller, string code, string data, string apparent_value)` - run execution of `code` with calldata `data`, as a contract at address `address`, on behalf of account `caller`. `apparent_value` is the message funds in WEI.
+
+Returns: a dictionary of the form:
+```
+{
+  "Ok": {
+    "exit_reason": { "Succeed": "Stopped" },
+    "return_value": "48656c6c6f20776f726c6421",      // some string hex value.
+    "apply": [ {"A": "modify", "address": "<address>", "balance": 12345, "nonce": 2,
+                "code": "608060405234801561001057600080fd5b50600436106100415", // new EVM code for address            "storage": [["<key in hex>", "<value in hex>"], ["<key in hex>", "<value in hex>"] ... ],
+                "reset_storage": false,  // whether to wipe the account storage before appying changes.
+                },
+               ...
+               {"A": "delete", "address": "<address of account to delete">},
+               ...
+               ],
+
+     "logs": [ { ... log entry ...}, { ... log entry ... }]    // will be specified.
+}
+```
+
+or
+```
+{
+   "Err": error_object // - can be just printed to the log message
+}
+```
+
+
