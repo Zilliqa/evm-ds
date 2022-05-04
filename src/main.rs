@@ -3,23 +3,30 @@
 // #![deny(warnings)]
 #![forbid(unsafe_code)]
 
+mod protos;
+mod scillabackend;
+
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::panic::{self, AssertUnwindSafe};
+use std::path::PathBuf;
 use std::rc::Rc;
 
 use clap::Parser;
-use evm::executor::stack::{MemoryStackState, StackSubstateMetadata};
-use evm::tracing;
+use evm::{
+    backend::Apply,
+    executor::stack::{MemoryStackState, StackSubstateMetadata},
+    tracing,
+};
+
+use serde::ser::{Serialize, Serializer, SerializeStructVariant};
 
 use core::str::FromStr;
 use log::{debug, info};
 
-use jsonrpc_core::{Error, IoHandler, Result};
+use jsonrpc_core::{Error, ErrorCode, IoHandler, Result};
 use jsonrpc_derive::rpc;
-use jsonrpc_ipc_server;
 use primitive_types::*;
-use scillabackend::ScillaBackend;
-
-mod scillabackend;
+use scillabackend::ScillaBackendFactory;
 
 /// EVM JSON-RPC server
 #[derive(Parser, Debug)]
@@ -33,13 +40,54 @@ struct Args {
     #[clap(short, long, default_value = "/tmp/zilliqa.sock")]
     node_socket: String,
 
-    /// Path of the EVM server Unix domain socket.
+    /// Path of the EVM server HTTP socket. Duplicates the `socket` above for convenience.
     #[clap(short = 'p', long, default_value = "3333")]
     http_port: u16,
 
     /// Trace the execution with debug logging.
     #[clap(short, long)]
     tracing: bool,
+}
+
+struct DirtyState(Apply<Vec<(H256, H256)>>);
+
+impl Serialize for DirtyState {
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        match &self.0 {
+            Apply::Modify {
+                ref address,
+                ref basic,
+                ref code,
+                ref storage,
+                reset_storage,
+            } => {
+                let mut state = serializer.serialize_struct_variant("A", 0, "modify", 6)?;
+                state.serialize_field("address", address)?;
+                state.serialize_field("balance", &basic.balance)?;
+                state.serialize_field("nonce", &basic.nonce)?;
+                state.serialize_field("code", code)?;
+                state.serialize_field("storage", storage)?;
+                state.serialize_field("reset_storage", &reset_storage)?;
+                Ok(state.end()?)
+            }
+            Apply::Delete { address } => {
+                let mut state = serializer.serialize_struct_variant("A", 0, "delete", 1)?;
+                state.serialize_field("address", address)?;
+                Ok(state.end()?)
+            }
+        }
+    }
+}
+
+#[derive(serde::Serialize)]
+pub struct EvmResult {
+    exit_reason: evm::ExitReason,
+    return_value: Vec<u8>,
+    apply: Vec<DirtyState>,
+    logs: Vec<ethereum::Log>,
 }
 
 #[rpc(server)]
@@ -52,12 +100,12 @@ pub trait Rpc {
         code: String,
         data: String,
         apparent_value: String,
-    ) -> Result<evm::ExitReason>;
+    ) -> Result<EvmResult>;
 }
 
-pub struct EvmServer {
+struct EvmServer {
     tracing: bool,
-    backend: ScillaBackend,
+    backend_factory: ScillaBackendFactory,
 }
 
 // TODO: remove this and introduce gas limit calculation based on balance etc.
@@ -71,7 +119,7 @@ impl Rpc for EvmServer {
         code_hex: String,
         data_hex: String,
         apparent_value: String,
-    ) -> Result<evm::ExitReason> {
+    ) -> Result<EvmResult> {
         let code =
             Rc::new(hex::decode(&code_hex).map_err(|e| Error::invalid_params(e.to_string()))?);
         let data =
@@ -81,11 +129,13 @@ impl Rpc for EvmServer {
         let context = evm::Context {
             address: H160::from_str(&address).map_err(|e| Error::invalid_params(e.to_string()))?,
             caller: H160::from_str(&caller).map_err(|e| Error::invalid_params(e.to_string()))?,
-            apparent_value: U256::from_str(&apparent_value).map_err(|e| Error::invalid_params(e.to_string()))?,
+            apparent_value: U256::from_str(&apparent_value)
+                .map_err(|e| Error::invalid_params(e.to_string()))?,
         };
         let mut runtime = evm::Runtime::new(code, data, context, &config);
         let metadata = StackSubstateMetadata::new(GAS_LIMIT, &config);
-        let state = MemoryStackState::new(metadata, &self.backend);
+        let backend = self.backend_factory.new_backend();
+        let state = MemoryStackState::new(metadata, &backend);
 
         // TODO: replace with the real precompiles
         let precompiles = ();
@@ -98,13 +148,56 @@ impl Rpc for EvmServer {
             code_hex, data_hex,
         );
         let mut listener = LoggingEventListener;
-        let exit_reason = if self.tracing {
-            evm::tracing::using(&mut listener, || executor.execute(&mut runtime))
-        } else {
-            executor.execute(&mut runtime)
-        };
-        info!("Exit: {:?}", exit_reason);
-        Ok(exit_reason)
+
+        // We have to catch panics, as error handling in the Backend interface of
+        // do not have Result, assuming all operations are successful.
+        //
+        // We are asserting it is safe to unwind, as objects will be dropped after
+        // the unwind.
+        let result = panic::catch_unwind(AssertUnwindSafe(|| {
+            if self.tracing {
+                evm::tracing::using(&mut listener, || executor.execute(&mut runtime))
+            } else {
+                executor.execute(&mut runtime)
+            }
+        }));
+        match result {
+            Ok(exit_reason) => {
+                info!("Exit: {:?}", exit_reason);
+
+                let (state_apply, logs) = executor.into_state().deconstruct();
+                Ok(EvmResult {
+                    exit_reason,
+                    return_value: runtime.machine().return_value(),
+                    apply: 
+                        state_apply
+                            .into_iter()
+                            .map(|apply| match apply {
+                                Apply::Delete { address } => DirtyState(Apply::Delete { address }),
+                                Apply::Modify {
+                                    address,
+                                    basic,
+                                    code,
+                                    storage,
+                                    reset_storage,
+                                } => DirtyState(Apply::Modify {
+                                    address,
+                                    basic,
+                                    code,
+                                    storage: storage.into_iter().collect(),
+                                    reset_storage,
+                                }),
+                            })
+                            .collect(),
+                    logs: logs.into_iter().collect(),
+                })
+            }
+            Err(_) => Err(Error {
+                code: ErrorCode::InternalError,
+                message: "EVM execution failed".to_string(),
+                data: None,
+            }),
+        }
     }
 }
 
@@ -116,7 +209,7 @@ impl tracing::EventListener for LoggingEventListener {
     }
 }
 
-fn main() {
+fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     env_logger::Builder::new()
         .filter_level(log::LevelFilter::Info)
         .parse_env("EVM_LOG")
@@ -134,10 +227,12 @@ fn main() {
     //     Ok(Value::String("hello".into()))
     // });
 
-    let scilla_backend = ScillaBackend;
+    // Connect to the backend as needed.
     let evm_sever = EvmServer {
         tracing: args.tracing,
-        backend: scilla_backend,
+        backend_factory: ScillaBackendFactory {
+            path: PathBuf::from(args.node_socket),
+        },
     };
 
     io.extend_with(evm_sever.to_delegate());
@@ -153,4 +248,6 @@ fn main() {
 
     ipc_server.wait();
     http_server.wait();
+
+    Ok(())
 }
