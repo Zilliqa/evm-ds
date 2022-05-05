@@ -12,6 +12,8 @@ use jsonrpc_core::{Error, Params, Result, Value};
 use jsonrpc_core_client::{transports::ipc, RawClient, RpcError};
 use primitive_types::{H160, H256, U256};
 
+use log::{debug, info};
+
 use protobuf::Message;
 
 use crate::protos::ScillaMessage;
@@ -36,8 +38,6 @@ pub struct ScillaBackend {
     // Established JSONRPC client.
     client: RefCell<Option<RawClient>>,
 
-    // Logs collected to return
-    
 }
 
 impl ScillaBackend {
@@ -50,23 +50,29 @@ impl ScillaBackend {
 
     // Create a JSON RPC client to the node, or reuse an existing one.
     fn client(&self) -> Ref<'_, RawClient> {
-        let chan = self.client.borrow();
-        if chan.is_some() {
-            return Ref::map(chan, |x| x.as_ref().unwrap());
+        {
+            let chan = self.client.borrow();
+            if chan.is_some() {
+                return Ref::map(chan, |x| x.as_ref().unwrap());
+            }
         }
-        let client = futures::executor::block_on(async {
+
+        let handle = tokio::runtime::Handle::current();
+        let client = handle.block_on(async {
             let client = ipc::connect(&self.path).await?;
             std::result::Result::<RawClient, RpcError>::Ok(client)
         })
-        .expect("Node JSONRPC client");
-        *self.client.borrow_mut() = Some(client);
+            .expect("Node JSONRPC client");
+        self.client.replace(Some(client));
         Ref::map(self.client.borrow(), |x| x.as_ref().unwrap())
     }
 
     // Call the Scilla IPC Server API.
     fn call_ipc_server_api(&self, method: &str, args: serde_json::Map<String, Value>) -> Value {
+        debug!("call_ipc_server_api: {}, {:?}", method, args);
         let client = self.client();
-        futures::executor::block_on(async move {
+        let handle = tokio::runtime::Handle::current();
+        handle.block_on(async move {
             client.call_method(method, Params::Map(args)).await
         })
         .unwrap_or_else(|_| panic!("{} call", method))

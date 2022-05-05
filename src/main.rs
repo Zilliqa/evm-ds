@@ -10,6 +10,7 @@ use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::panic::{self, AssertUnwindSafe};
 use std::path::PathBuf;
 use std::rc::Rc;
+use std::sync::{Arc, Mutex};
 
 use clap::Parser;
 use evm::{
@@ -18,15 +19,16 @@ use evm::{
     tracing,
 };
 
-use serde::ser::{Serialize, Serializer, SerializeStructVariant};
+use serde::ser::{Serialize, SerializeStructVariant, Serializer};
 
 use core::str::FromStr;
 use log::{debug, info};
 
-use jsonrpc_core::{Error, ErrorCode, IoHandler, Result};
+use jsonrpc_core::{BoxFuture, Error, ErrorCode, IoHandler, Result};
 use jsonrpc_derive::rpc;
 use primitive_types::*;
-use scillabackend::ScillaBackendFactory;
+use scillabackend::{ScillaBackend, ScillaBackendFactory};
+use tokio::runtime::Handle;
 
 /// EVM JSON-RPC server
 #[derive(Parser, Debug)]
@@ -91,7 +93,7 @@ pub struct EvmResult {
 }
 
 #[rpc(server)]
-pub trait Rpc {
+pub trait Rpc: Send + 'static {
     #[rpc(name = "run")]
     fn run(
         &self,
@@ -100,7 +102,7 @@ pub trait Rpc {
         code: String,
         data: String,
         apparent_value: String,
-    ) -> Result<EvmResult>;
+    ) -> BoxFuture<Result<EvmResult>>;
 }
 
 struct EvmServer {
@@ -119,7 +121,34 @@ impl Rpc for EvmServer {
         code_hex: String,
         data_hex: String,
         apparent_value: String,
-    ) -> Result<EvmResult> {
+    ) -> BoxFuture<Result<EvmResult>> {
+        let backend = self.backend_factory.new_backend();
+        let tracing = self.tracing;
+        Box::pin(async move {
+            run_evm_impl(
+                address,
+                caller,
+                code_hex,
+                data_hex,
+                apparent_value,
+                backend,
+                tracing,
+            )
+            .await
+        })
+    }
+}
+
+async fn run_evm_impl(
+    address: String,
+    caller: String,
+    code_hex: String,
+    data_hex: String,
+    apparent_value: String,
+    backend: ScillaBackend,
+    tracing: bool,
+) -> Result<EvmResult> {
+    tokio::task::spawn_blocking(move || {
         let code =
             Rc::new(hex::decode(&code_hex).map_err(|e| Error::invalid_params(e.to_string()))?);
         let data =
@@ -134,7 +163,6 @@ impl Rpc for EvmServer {
         };
         let mut runtime = evm::Runtime::new(code, data, context, &config);
         let metadata = StackSubstateMetadata::new(GAS_LIMIT, &config);
-        let backend = self.backend_factory.new_backend();
         let state = MemoryStackState::new(metadata, &backend);
 
         // TODO: replace with the real precompiles
@@ -155,7 +183,7 @@ impl Rpc for EvmServer {
         // We are asserting it is safe to unwind, as objects will be dropped after
         // the unwind.
         let result = panic::catch_unwind(AssertUnwindSafe(|| {
-            if self.tracing {
+            if tracing {
                 evm::tracing::using(&mut listener, || executor.execute(&mut runtime))
             } else {
                 executor.execute(&mut runtime)
@@ -169,26 +197,25 @@ impl Rpc for EvmServer {
                 Ok(EvmResult {
                     exit_reason,
                     return_value: hex::encode(runtime.machine().return_value()),
-                    apply: 
-                        state_apply
-                            .into_iter()
-                            .map(|apply| match apply {
-                                Apply::Delete { address } => DirtyState(Apply::Delete { address }),
-                                Apply::Modify {
-                                    address,
-                                    basic,
-                                    code,
-                                    storage,
-                                    reset_storage,
-                                } => DirtyState(Apply::Modify {
-                                    address,
-                                    basic,
-                                    code,
-                                    storage: storage.into_iter().collect(),
-                                    reset_storage,
-                                }),
-                            })
-                            .collect(),
+                    apply: state_apply
+                        .into_iter()
+                        .map(|apply| match apply {
+                            Apply::Delete { address } => DirtyState(Apply::Delete { address }),
+                            Apply::Modify {
+                                address,
+                                basic,
+                                code,
+                                storage,
+                                reset_storage,
+                            } => DirtyState(Apply::Modify {
+                                address,
+                                basic,
+                                code,
+                                storage: storage.into_iter().collect(),
+                                reset_storage,
+                            }),
+                        })
+                        .collect(),
                     logs: logs.into_iter().collect(),
                 })
             }
@@ -198,7 +225,9 @@ impl Rpc for EvmServer {
                 data: None,
             }),
         }
-    }
+    })
+    .await
+    .unwrap()
 }
 
 struct LoggingEventListener;
@@ -209,7 +238,8 @@ impl tracing::EventListener for LoggingEventListener {
     }
 }
 
-fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
+#[tokio::main]
+async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     env_logger::Builder::new()
         .filter_level(log::LevelFilter::Info)
         .parse_env("EVM_LOG")
@@ -223,10 +253,6 @@ fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     // - disambiguate (_json)
 
     let mut io = IoHandler::new();
-    // io.add_method("say_hello", |_params| async {
-    //     Ok(Value::String("hello".into()))
-    // });
-
     // Connect to the backend as needed.
     let evm_sever = EvmServer {
         tracing: args.tracing,
@@ -235,19 +261,54 @@ fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
         },
     };
 
+    let tokio_runtime_handle = Handle::current();
+
     io.extend_with(evm_sever.to_delegate());
-    let builder = jsonrpc_ipc_server::ServerBuilder::new(io.clone());
+    let ipc_server_handle: Arc<Mutex<Option<jsonrpc_ipc_server::CloseHandle>>> =
+        Arc::new(Mutex::new(None));
+    let ipc_server_handle_clone = ipc_server_handle.clone();
+    let http_server_handle: Arc<Mutex<Option<jsonrpc_http_server::CloseHandle>>> =
+        Arc::new(Mutex::new(None));
+    let http_server_handle_clone = http_server_handle.clone();
+    io.add_method("die", move |_params| {
+        ipc_server_handle_clone
+            .lock()
+            .unwrap()
+            .take()
+            .map(|handle| handle.close());
+        http_server_handle_clone
+            .lock()
+            .unwrap()
+            .take()
+            .map(|handle| handle.close());
+        futures::future::ready(Ok(jsonrpc_core::Value::Null))
+    });
+
+    // Start the IPC server (Unix domain socket).
+    let builder = jsonrpc_ipc_server::ServerBuilder::new(io.clone())
+        .event_loop_executor(tokio_runtime_handle.clone());
     let ipc_server = builder.start(&args.socket).expect("Couldn't open socket");
-    let builder = jsonrpc_http_server::ServerBuilder::new(io);
+    // Save the handle so that we can shut it down gracefully.
+    *ipc_server_handle.lock().unwrap() = Some(ipc_server.close_handle());
+
+    // Start the HTTP server.
+    let builder = jsonrpc_http_server::ServerBuilder::new(io)
+        .event_loop_executor(tokio_runtime_handle.clone());
     let http_server = builder
         .start_http(&SocketAddr::new(
             IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)),
             args.http_port,
         ))
         .expect("Couldn't open socket");
+    // Save the handle so that we can shut it down gracefully.
+    *http_server_handle.lock().unwrap() = Some(http_server.close_handle());
 
-    ipc_server.wait();
-    http_server.wait();
+    tokio::spawn(async move {
+        ipc_server.wait();
+        http_server.wait();
+        println!("Dying gracefully");
+    })
+    .await?;
 
     Ok(())
 }
