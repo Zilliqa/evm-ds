@@ -13,7 +13,7 @@ use jsonrpc_core::{Error, Result, Value};
 use jsonrpc_core_client::{RawClient, RpcError};
 use primitive_types::{H160, H256, U256};
 
-use log::debug;
+use log::{debug, info};
 
 use protobuf::Message;
 
@@ -82,6 +82,7 @@ impl ScillaBackend {
     }
 
     fn query_jsonrpc(&self, query_name: &str, query_args: Option<&str>) -> Value {
+        info!("query_jsonrpc: {}, {:?}", query_name, query_args);
         // Make a JSON Query for fetchBlockchaininfo
         let mut args = serde_json::Map::new();
         args.insert("query_name".into(), query_name.into());
@@ -112,6 +113,8 @@ impl ScillaBackend {
         key: Option<H256>,
         use_default: bool,
     ) -> Result<Option<Value>> {
+        info!("query_state_value: {} {} {:?} {}",
+              address, query_name, key, use_default);
         let mut query = ScillaMessage::ProtoScillaQuery::new();
         query.set_name(query_name.into());
         if let Some(key) = key {
@@ -129,7 +132,7 @@ impl ScillaBackend {
         );
 
         // If the RPC call failed, something is wrong, and it is better to crash.
-        let mut result = self.call_ipc_server_api("fetchExternalStateValue64", args);
+        let mut result = self.call_ipc_server_api("fetchExternalStateValueB64", args);
         // If the RPC was okay, but we didn't get a value, that's
         // normal, just return empty code.
         let default_false = Value::Bool(false);
@@ -248,9 +251,12 @@ impl<'config> Backend for ScillaBackend {
         let result = self
             .query_state_value(address, "_evm_storage", Some(key), true)
             .expect("query_state_value(_evm_storage)")
-            .expect("query_state_value(_evm_storage) result");
-        let result = result.as_str().unwrap_or("0");
-        let result = hex::decode(result).unwrap_or_else(|_| vec![0u8]);
+            .unwrap_or_default();
+        let mut result = hex::decode(result.as_str().unwrap_or_default())
+            .unwrap_or_default();
+        // H256::from_slice expects big-endian, we filled the first bytes from decoding,
+        // now need to extend to the required size.
+        result.resize(256 / 8, 0u8);
         H256::from_slice(&result)
     }
 
