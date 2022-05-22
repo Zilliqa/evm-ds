@@ -8,14 +8,16 @@ use std::{
 
 use evm::backend::{Backend, Basic};
 use jsonrpc_core::serde_json;
-use jsonrpc_core::{Error, Params, Result, Value};
-use jsonrpc_core_client::{transports::ipc, RawClient, RpcError};
+use jsonrpc_core::types::params::Params;
+use jsonrpc_core::{Error, Result, Value};
+use jsonrpc_core_client::{RawClient, RpcError};
 use primitive_types::{H160, H256, U256};
 
-use log::{debug, info};
+use log::debug;
 
 use protobuf::Message;
 
+use crate::ipc_connect;
 use crate::protos::ScillaMessage;
 
 const BASE_CHAIN_ID: u64 = 33000;
@@ -37,7 +39,6 @@ pub struct ScillaBackend {
 
     // Established JSONRPC client.
     client: RefCell<Option<RawClient>>,
-
 }
 
 impl ScillaBackend {
@@ -58,10 +59,11 @@ impl ScillaBackend {
         }
 
         let handle = tokio::runtime::Handle::current();
-        let client = handle.block_on(async {
-            let client = ipc::connect(&self.path).await?;
-            std::result::Result::<RawClient, RpcError>::Ok(client)
-        })
+        let client = handle
+            .block_on(async {
+                let client = ipc_connect::ipc_connect(&self.path).await?;
+                std::result::Result::<RawClient, RpcError>::Ok(client)
+            })
             .expect("Node JSONRPC client");
         self.client.replace(Some(client));
         Ref::map(self.client.borrow(), |x| x.as_ref().unwrap())
@@ -72,10 +74,11 @@ impl ScillaBackend {
         debug!("call_ipc_server_api: {}, {:?}", method, args);
         let client = self.client();
         let handle = tokio::runtime::Handle::current();
-        handle.block_on(async move {
-            client.call_method(method, Params::Map(args)).await
-        })
-        .unwrap_or_else(|_| panic!("{} call", method))
+        handle
+            .block_on(async move { client.call_method(method, Params::Map(args)).await })
+            .unwrap_or_else(|e| {
+                panic!("{} call, err {:?}", method, e);
+            })
     }
 
     fn query_jsonrpc(&self, query_name: &str, query_args: Option<&str>) -> Value {
@@ -120,10 +123,13 @@ impl ScillaBackend {
 
         let mut args = serde_json::Map::new();
         args.insert("addr".into(), hex::encode(address.as_bytes()).into());
-        args.insert("query".into(), query.write_to_bytes().unwrap().into());
+        args.insert(
+            "query".into(),
+            base64::encode(query.write_to_bytes().unwrap()).into(),
+        );
 
         // If the RPC call failed, something is wrong, and it is better to crash.
-        let mut result = self.call_ipc_server_api("fetchExternalStateValue", args);
+        let mut result = self.call_ipc_server_api("fetchExternalStateValue64", args);
         // If the RPC was okay, but we didn't get a value, that's
         // normal, just return empty code.
         let default_false = Value::Bool(false);

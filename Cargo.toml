@@ -5,6 +5,7 @@ edition = "2021"
 
 [dependencies]
 anyhow = { version = "1.0.56", default-features = false }
+base64 = "0.13.0"
 bytes = "1.1.0"
 clap = { version = "3.1.6", features = ["derive"] }
 env_logger = "0.9.0"
@@ -14,14 +15,25 @@ serde = { version = "1.0.137", features = ["derive"] }
 futures = { version = "0.3.21", features = ["executor", "thread-pool"] }
 jsonrpc-core = "18.0.0"
 jsonrpc-core-client = { version = "18.0.0", features = ["ipc"] }
+jsonrpc-client-transports = "18.0.0"
 jsonrpc-derive = "18.0.0"
 jsonrpc-ipc-server = "18.0.0"
 jsonrpc-http-server = "18.0.0"
+jsonrpc-server-utils = "18.0.0"
 hex = "0.4"
 log = "0.4.16"
 primitive-types = { version = "0.11.1", features = ["serde"] }
+parity-tokio-ipc = "0.9"
 protobuf = { version = "2.27.1",  features = ["with-bytes"] }
 tokio = { version = "1.17", features = ["full"] }
 
 [build-dependencies]
 protoc-rust = "2"
+
+[patch.crates-io]
+jsonrpc-ipc-server = { git = 'https://github.com/valeryz/jsonrpc', branch = "valeryz_fix_stream_eof" }
+jsonrpc-http-server = { git = 'https://github.com/valeryz/jsonrpc', branch = "valeryz_fix_stream_eof" }
+jsonrpc-server-utils = { git = 'https://github.com/valeryz/jsonrpc', branch = "valeryz_fix_stream_eof" }
+jsonrpc-core = { git = 'https://github.com/valeryz/jsonrpc', branch = "valeryz_fix_stream_eof" }
+jsonrpc-core-client = { git = 'https://github.com/valeryz/jsonrpc', branch = "valeryz_fix_stream_eof" }
+jsonrpc-client-transports = { git = 'https://github.com/valeryz/jsonrpc', branch = "valeryz_fix_stream_eof" }

@@ -3,6 +3,7 @@
 // #![deny(warnings)]
 #![forbid(unsafe_code)]
 
+mod ipc_connect;
 mod protos;
 mod scillabackend;
 
@@ -26,6 +27,7 @@ use log::{debug, info};
 
 use jsonrpc_core::{BoxFuture, Error, ErrorCode, IoHandler, Result};
 use jsonrpc_derive::rpc;
+use jsonrpc_server_utils::codecs;
 use primitive_types::*;
 use scillabackend::{ScillaBackend, ScillaBackendFactory};
 use tokio::runtime::Handle;
@@ -271,21 +273,21 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
         Arc::new(Mutex::new(None));
     let http_server_handle_clone = http_server_handle.clone();
     io.add_method("die", move |_params| {
-        ipc_server_handle_clone
-            .lock()
-            .unwrap()
-            .take()
-            .map(|handle| handle.close());
-        http_server_handle_clone
-            .lock()
-            .unwrap()
-            .take()
-            .map(|handle| handle.close());
+        if let Some(handle) = ipc_server_handle_clone.lock().unwrap().take() {
+            handle.close()
+        }
+        if let Some(handle) = http_server_handle_clone.lock().unwrap().take() {
+            handle.close()
+        }
         futures::future::ready(Ok(jsonrpc_core::Value::Null))
     });
 
     // Start the IPC server (Unix domain socket).
     let builder = jsonrpc_ipc_server::ServerBuilder::new(io.clone())
+        .request_separators(
+            codecs::Separator::Byte(b'\n'),
+            codecs::Separator::Byte(b'\n'),
+        )
         .event_loop_executor(tokio_runtime_handle.clone());
     let ipc_server = builder.start(&args.socket).expect("Couldn't open socket");
     // Save the handle so that we can shut it down gracefully.
