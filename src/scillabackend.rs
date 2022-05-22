@@ -74,11 +74,20 @@ impl ScillaBackend {
         debug!("call_ipc_server_api: {}, {:?}", method, args);
         let client = self.client();
         let handle = tokio::runtime::Handle::current();
-        handle
-            .block_on(async move { client.call_method(method, Params::Map(args)).await })
-            .unwrap_or_else(|e| {
+        let call_with_timeout = handle.block_on(async move {
+            tokio::time::timeout(
+                tokio::time::Duration::from_secs(2), // Require response in 2 secs max.
+                client.call_method(method, Params::Map(args)),
+            )
+            .await
+        });
+        if let Ok(result) = call_with_timeout {
+            result.unwrap_or_else(|e| {
                 panic!("{} call, err {:?}", method, e);
             })
+        } else {
+            panic!("timeout calling {}", method);
+        }
     }
 
     fn query_jsonrpc(&self, query_name: &str, query_args: Option<&str>) -> Value {
@@ -113,8 +122,10 @@ impl ScillaBackend {
         key: Option<H256>,
         use_default: bool,
     ) -> Result<Option<Value>> {
-        info!("query_state_value: {} {} {:?} {}",
-              address, query_name, key, use_default);
+        info!(
+            "query_state_value: {} {} {:?} {}",
+            address, query_name, key, use_default
+        );
         let mut query = ScillaMessage::ProtoScillaQuery::new();
         query.set_name(query_name.into());
         if let Some(key) = key {
@@ -252,8 +263,7 @@ impl<'config> Backend for ScillaBackend {
             .query_state_value(address, "_evm_storage", Some(key), true)
             .expect("query_state_value(_evm_storage)")
             .unwrap_or_default();
-        let mut result = hex::decode(result.as_str().unwrap_or_default())
-            .unwrap_or_default();
+        let mut result = hex::decode(result.as_str().unwrap_or_default()).unwrap_or_default();
         // H256::from_slice expects big-endian, we filled the first bytes from decoding,
         // now need to extend to the required size.
         result.resize(256 / 8, 0u8);
