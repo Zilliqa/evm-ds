@@ -25,11 +25,11 @@ use serde::ser::{Serialize, SerializeStructVariant, Serializer};
 use core::str::FromStr;
 use log::{debug, info};
 
-use jsonrpc_core::{Error, ErrorCode, IoHandler, Result};
+use jsonrpc_core::{BoxFuture, Error, ErrorCode, IoHandler, Result};
 use jsonrpc_derive::rpc;
 use jsonrpc_server_utils::codecs;
 use primitive_types::*;
-use scillabackend::ScillaBackendFactory;
+use scillabackend::{ScillaBackend, ScillaBackendFactory};
 
 /// EVM JSON-RPC server
 #[derive(Parser, Debug)]
@@ -103,7 +103,7 @@ pub trait Rpc: Send + 'static {
         code: String,
         data: String,
         apparent_value: String,
-    ) -> Result<EvmResult>;
+    ) -> BoxFuture<Result<EvmResult>>;
 }
 
 struct EvmServer {
@@ -122,9 +122,34 @@ impl Rpc for EvmServer {
         code_hex: String,
         data_hex: String,
         apparent_value: String,
-    ) -> Result<EvmResult> {
+    ) -> BoxFuture<Result<EvmResult>> {
         let backend = self.backend_factory.new_backend();
         let tracing = self.tracing;
+        Box::pin(async move {
+            run_evm_impl(
+                address,
+                caller,
+                code_hex,
+                data_hex,
+                apparent_value,
+                backend,
+                tracing,
+            )
+            .await
+        })
+    }
+}
+
+async fn run_evm_impl(
+    address: String,
+    caller: String,
+    code_hex: String,
+    data_hex: String,
+    apparent_value: String,
+    backend: ScillaBackend,
+    tracing: bool,
+) -> Result<EvmResult> {
+    tokio::task::spawn_blocking(move || {
         let code =
             Rc::new(hex::decode(&code_hex).map_err(|e| Error::invalid_params(e.to_string()))?);
         let data =
@@ -201,7 +226,9 @@ impl Rpc for EvmServer {
                 data: None,
             }),
         }
-    }
+    })
+    .await
+    .unwrap()
 }
 
 struct LoggingEventListener;
