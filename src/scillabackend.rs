@@ -1,16 +1,13 @@
 use std::mem;
 /// Backend implementation that stores EVM state via the Scilla JSONRPC interface.
 use std::path::{Path, PathBuf};
-use std::{
-    cell::{Ref, RefCell},
-    str::FromStr,
-};
+use std::str::FromStr;
 
 use evm::backend::{Backend, Basic};
 use jsonrpc_core::serde_json;
 use jsonrpc_core::types::params::Params;
 use jsonrpc_core::{Error, Result, Value};
-use jsonrpc_core_client::{RawClient, RpcError};
+use jsonrpc_core_client::{RawClient};
 use primitive_types::{H160, H256, U256};
 
 use log::{debug, info};
@@ -36,45 +33,21 @@ impl ScillaBackendFactory {
 pub struct ScillaBackend {
     // Path to the Unix domain socket over which we talk to the Node.
     path: PathBuf,
-
-    // Established JSONRPC client.
-    client: RefCell<Option<RawClient>>,
 }
 
 impl ScillaBackend {
     pub fn new<P: AsRef<Path>>(path: P) -> Self {
         Self {
             path: path.as_ref().to_path_buf(),
-            client: RefCell::new(None),
         }
-    }
-
-    // Create a JSON RPC client to the node, or reuse an existing one.
-    fn client(&self) -> Ref<'_, RawClient> {
-        {
-            let chan = self.client.borrow();
-            if chan.is_some() {
-                return Ref::map(chan, |x| x.as_ref().unwrap());
-            }
-        }
-
-        let handle = tokio::runtime::Handle::current();
-        let client = handle
-            .block_on(async {
-                let client = ipc_connect::ipc_connect(&self.path).await?;
-                std::result::Result::<RawClient, RpcError>::Ok(client)
-            })
-            .expect("Node JSONRPC client");
-        self.client.replace(Some(client));
-        Ref::map(self.client.borrow(), |x| x.as_ref().unwrap())
     }
 
     // Call the Scilla IPC Server API.
     fn call_ipc_server_api(&self, method: &str, args: serde_json::Map<String, Value>) -> Value {
         debug!("call_ipc_server_api: {}, {:?}", method, args);
-        let client = self.client();
-        let handle = tokio::runtime::Handle::current();
+        let handle = tokio::runtime::Runtime::new().unwrap();
         let call_with_timeout = handle.block_on(async move {
+            let client: RawClient = ipc_connect::ipc_connect(&self.path).await.unwrap();
             tokio::time::timeout(
                 tokio::time::Duration::from_secs(2), // Require response in 2 secs max.
                 client.call_method(method, Params::Map(args)),
@@ -111,7 +84,7 @@ impl ScillaBackend {
 
     fn query_jsonrpc_u64<OutputType: From<u64>>(&self, query_name: &str) -> OutputType {
         serde_json::from_value::<u64>(self.query_jsonrpc(query_name, None))
-            .expect("fetchBlockchainInfo BLOCKNUMBER")
+            .unwrap_or_default()
             .into()
     }
 
@@ -236,14 +209,14 @@ impl<'config> Backend for ScillaBackend {
         let result = self
             .query_state_value(address, "_balance", None, true)
             .expect("query_state_value _balance")
-            .map(|x| x.as_u64().expect("balance as number"))
-            .unwrap_or(0);
+            .map(|x| x.as_u64().unwrap_or_default())
+            .unwrap_or_default();
         let balance = U256::from(result);
         let result = self
             .query_state_value(address, "_nonce", None, false)
             .expect("query_state_value _nonce")
-            .map(|x| x.as_u64().expect("nonce as number"))
-            .unwrap_or(0);
+            .map(|x| x.as_u64().unwrap_or_default())
+            .unwrap_or_default();
         let nonce = U256::from(result);
         Basic { balance, nonce }
     }

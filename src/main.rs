@@ -30,7 +30,6 @@ use jsonrpc_derive::rpc;
 use jsonrpc_server_utils::codecs;
 use primitive_types::*;
 use scillabackend::{ScillaBackend, ScillaBackendFactory};
-use tokio::runtime::Handle;
 
 /// EVM JSON-RPC server
 #[derive(Parser, Debug)]
@@ -150,7 +149,7 @@ async fn run_evm_impl(
     backend: ScillaBackend,
     tracing: bool,
 ) -> Result<EvmResult> {
-    tokio::task::spawn_blocking(move || {
+    let res = tokio::task::spawn_blocking(move || {
         let code =
             Rc::new(hex::decode(&code_hex).map_err(|e| Error::invalid_params(e.to_string()))?);
         let data =
@@ -228,8 +227,10 @@ async fn run_evm_impl(
             }),
         }
     })
-    .await
-    .unwrap()
+    .await;
+    //    .unwrap()
+    // let () = res;
+    res.unwrap()
 }
 
 struct LoggingEventListener;
@@ -240,8 +241,7 @@ impl tracing::EventListener for LoggingEventListener {
     }
 }
 
-#[tokio::main]
-async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
+fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     env_logger::Builder::new()
         .filter_level(log::LevelFilter::Info)
         .parse_env("EVM_LOG")
@@ -263,8 +263,6 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
         },
     };
 
-    let tokio_runtime_handle = Handle::current();
-
     io.extend_with(evm_sever.to_delegate());
     let ipc_server_handle: Arc<Mutex<Option<jsonrpc_ipc_server::CloseHandle>>> =
         Arc::new(Mutex::new(None));
@@ -283,19 +281,16 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     });
 
     // Start the IPC server (Unix domain socket).
-    let builder = jsonrpc_ipc_server::ServerBuilder::new(io.clone())
-        .request_separators(
-            codecs::Separator::Byte(b'\n'),
-            codecs::Separator::Byte(b'\n'),
-        )
-        .event_loop_executor(tokio_runtime_handle.clone());
+    let builder = jsonrpc_ipc_server::ServerBuilder::new(io.clone()).request_separators(
+        codecs::Separator::Byte(b'\n'),
+        codecs::Separator::Byte(b'\n'),
+    );
     let ipc_server = builder.start(&args.socket).expect("Couldn't open socket");
     // Save the handle so that we can shut it down gracefully.
     *ipc_server_handle.lock().unwrap() = Some(ipc_server.close_handle());
 
     // Start the HTTP server.
-    let builder = jsonrpc_http_server::ServerBuilder::new(io)
-        .event_loop_executor(tokio_runtime_handle.clone());
+    let builder = jsonrpc_http_server::ServerBuilder::new(io);
     let http_server = builder
         .start_http(&SocketAddr::new(
             IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)),
@@ -305,12 +300,8 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     // Save the handle so that we can shut it down gracefully.
     *http_server_handle.lock().unwrap() = Some(http_server.close_handle());
 
-    tokio::spawn(async move {
-        ipc_server.wait();
-        http_server.wait();
-        println!("Dying gracefully");
-    })
-    .await?;
+    ipc_server.wait();
+    http_server.wait();
 
     Ok(())
 }
