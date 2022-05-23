@@ -7,7 +7,7 @@ use evm::backend::{Backend, Basic};
 use jsonrpc_core::serde_json;
 use jsonrpc_core::types::params::Params;
 use jsonrpc_core::{Error, Result, Value};
-use jsonrpc_core_client::{RawClient};
+use jsonrpc_core_client::RawClient;
 use primitive_types::{H160, H256, U256};
 
 use log::{debug, info};
@@ -45,8 +45,14 @@ impl ScillaBackend {
     // Call the Scilla IPC Server API.
     fn call_ipc_server_api(&self, method: &str, args: serde_json::Map<String, Value>) -> Value {
         debug!("call_ipc_server_api: {}, {:?}", method, args);
-        let handle = tokio::runtime::Runtime::new().unwrap();
-        let call_with_timeout = handle.block_on(async move {
+        // Within this runtime, we need a separate runtime just to handle all JSON
+        // client operations. The runtime will then drop and close all connections
+        // and release all resources. Also when the thread panics.
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let call_with_timeout = rt.block_on(async move {
             let client: RawClient = ipc_connect::ipc_connect(&self.path).await.unwrap();
             tokio::time::timeout(
                 tokio::time::Duration::from_secs(2), // Require response in 2 secs max.
