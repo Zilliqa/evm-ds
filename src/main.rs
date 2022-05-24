@@ -261,6 +261,9 @@ fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
         },
     };
 
+    // Set up a channel to shut down the servers
+    let (sender, receiver) = std::sync::mpsc::channel();
+
     io.extend_with(evm_sever.to_delegate());
     let ipc_server_handle: Arc<Mutex<Option<jsonrpc_ipc_server::CloseHandle>>> =
         Arc::new(Mutex::new(None));
@@ -268,13 +271,12 @@ fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     let http_server_handle: Arc<Mutex<Option<jsonrpc_http_server::CloseHandle>>> =
         Arc::new(Mutex::new(None));
     let http_server_handle_clone = http_server_handle.clone();
-    io.add_method("die", move |_params| {
-        if let Some(handle) = ipc_server_handle_clone.lock().unwrap().take() {
-            handle.close()
-        }
-        if let Some(handle) = http_server_handle_clone.lock().unwrap().take() {
-            handle.close()
-        }
+
+    // Have the "die" method send a signal to shut it down.
+    // Mutex because the methods require all captured values to be Sync.
+    let sender = std::sync::Mutex::new(sender);
+    io.add_method("die", move |_param| {
+        let _ = sender.lock().unwrap().send(()).unwrap();
         futures::future::ready(Ok(jsonrpc_core::Value::Null))
     });
 
@@ -298,6 +300,18 @@ fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     // Save the handle so that we can shut it down gracefully.
     *http_server_handle.lock().unwrap() = Some(http_server.close_handle());
 
+    // On recepit of the signal, shut down the servers.
+    let _ = receiver.recv();
+
+    // Send signals to each of the servers to shut down.
+    if let Some(handle) = ipc_server_handle_clone.lock().unwrap().take() {
+        handle.close()
+    }
+    if let Some(handle) = http_server_handle_clone.lock().unwrap().take() {
+        handle.close()
+    }
+
+    // Wait until both servers shutdown cleanly.
     ipc_server.wait();
     http_server.wait();
 
