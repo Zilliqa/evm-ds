@@ -25,7 +25,7 @@ use serde::ser::{Serialize, SerializeStructVariant, Serializer};
 use core::str::FromStr;
 use log::{debug, info};
 
-use jsonrpc_core::{BoxFuture, Error, ErrorCode, IoHandler, Result};
+use jsonrpc_core::{BoxFuture, Error, IoHandler, Result};
 use jsonrpc_derive::rpc;
 use jsonrpc_server_utils::codecs;
 use primitive_types::*;
@@ -91,6 +91,7 @@ pub struct EvmResult {
     return_value: String,
     apply: Vec<DirtyState>,
     logs: Vec<ethereum::Log>,
+    remaining_gas: u64,
 }
 
 #[rpc(server)]
@@ -103,6 +104,7 @@ pub trait Rpc: Send + 'static {
         code: String,
         data: String,
         apparent_value: String,
+        gas_limit: u64,
     ) -> BoxFuture<Result<EvmResult>>;
 }
 
@@ -110,9 +112,6 @@ struct EvmServer {
     tracing: bool,
     backend_factory: ScillaBackendFactory,
 }
-
-// TODO: remove this and introduce gas limit calculation based on balance etc.
-const GAS_LIMIT: u64 = 1_000_000_000;
 
 impl Rpc for EvmServer {
     fn run(
@@ -122,6 +121,7 @@ impl Rpc for EvmServer {
         code_hex: String,
         data_hex: String,
         apparent_value: String,
+        gas_limit: u64,
     ) -> BoxFuture<Result<EvmResult>> {
         let backend = self.backend_factory.new_backend();
         let tracing = self.tracing;
@@ -132,6 +132,7 @@ impl Rpc for EvmServer {
                 code_hex,
                 data_hex,
                 apparent_value,
+                gas_limit,
                 backend,
                 tracing,
             )
@@ -146,6 +147,7 @@ async fn run_evm_impl(
     code_hex: String,
     data_hex: String,
     apparent_value: String,
+    gas_limit: u64,
     backend: ScillaBackend,
     tracing: bool,
 ) -> Result<EvmResult> {
@@ -168,7 +170,7 @@ async fn run_evm_impl(
                 .map_err(|e| Error::invalid_params(e.to_string()))?,
         };
         let mut runtime = evm::Runtime::new(code, data, context, &config);
-        let metadata = StackSubstateMetadata::new(GAS_LIMIT, &config);
+        let metadata = StackSubstateMetadata::new(gas_limit, &config);
         let state = MemoryStackState::new(metadata, &backend);
 
         // TODO: replace with the real precompiles
@@ -195,10 +197,10 @@ async fn run_evm_impl(
                 executor.execute(&mut runtime)
             }
         }));
+        let remaining_gas = executor.gas();
         match result {
             Ok(exit_reason) => {
                 info!("Exit: {:?}", exit_reason);
-
                 let (state_apply, logs) = executor.into_state().deconstruct();
                 Ok(EvmResult {
                     exit_reason,
@@ -223,12 +225,17 @@ async fn run_evm_impl(
                         })
                         .collect(),
                     logs: logs.into_iter().collect(),
+                    remaining_gas,
                 })
             }
-            Err(_) => Err(Error {
-                code: ErrorCode::InternalError,
-                message: "EVM execution failed".to_string(),
-                data: None,
+            Err(_) => Ok(EvmResult {
+                exit_reason: evm::ExitReason::Fatal(evm::ExitFatal::Other(
+                    "EVM execution failed".into(),
+                )),
+                return_value: "".to_string(),
+                apply: vec![],
+                logs: vec![], // TODO: shouldn't we get the logs here too?
+                remaining_gas,
             }),
         }
     })
