@@ -250,14 +250,12 @@ fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
         .parse_env("EVM_LOG")
         .init();
 
-    let args = Args::parse();
-
     // Required methods:
     // - check (_json - wtf is the parameter?)
     // - run (_json)
     // - disambiguate (_json)
 
-    let mut io = IoHandler::new();
+    let args = Args::parse();
     // Connect to the backend as needed.
     let evm_sever = EvmServer {
         tracing: args.tracing,
@@ -266,10 +264,20 @@ fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
         },
     };
 
-    // Set up a channel to shut down the servers
-    let (sender, receiver) = std::sync::mpsc::channel();
+    // Setup a channel to signal a shutdown.
+    let (shutdown_sender, shutdown_receiver) = std::sync::mpsc::channel();
 
+    let mut io = IoHandler::new();
     io.extend_with(evm_sever.to_delegate());
+    let shutdown_sender = std::sync::Mutex::new(shutdown_sender);
+    // Have the "die" method send a signal to shut it down.
+    // Mutex because the methods require all captured values to be Sync.
+    // Set up a channel to shut down the servers
+    io.add_method("die", move |_param| {
+        let _ = shutdown_sender.lock().unwrap().send(()).unwrap();
+        futures::future::ready(Ok(jsonrpc_core::Value::Null))
+    });
+
     let ipc_server_handle: Arc<Mutex<Option<jsonrpc_ipc_server::CloseHandle>>> =
         Arc::new(Mutex::new(None));
     let ipc_server_handle_clone = ipc_server_handle.clone();
@@ -277,15 +285,7 @@ fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
         Arc::new(Mutex::new(None));
     let http_server_handle_clone = http_server_handle.clone();
 
-    // Have the "die" method send a signal to shut it down.
-    // Mutex because the methods require all captured values to be Sync.
-    let sender = std::sync::Mutex::new(sender);
-    io.add_method("die", move |_param| {
-        let _ = sender.lock().unwrap().send(()).unwrap();
-        futures::future::ready(Ok(jsonrpc_core::Value::Null))
-    });
-
-    // Start the IPC server (Unix domain socket).
+    // Build and start the IPC server (Unix domain socket).
     let builder = jsonrpc_ipc_server::ServerBuilder::new(io.clone()).request_separators(
         codecs::Separator::Byte(b'\n'),
         codecs::Separator::Byte(b'\n'),
@@ -294,7 +294,7 @@ fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     // Save the handle so that we can shut it down gracefully.
     *ipc_server_handle.lock().unwrap() = Some(ipc_server.close_handle());
 
-    // Start the HTTP server.
+    // Build and start the HTTP server.
     let builder = jsonrpc_http_server::ServerBuilder::new(io);
     let http_server = builder
         .start_http(&SocketAddr::new(
@@ -305,8 +305,9 @@ fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     // Save the handle so that we can shut it down gracefully.
     *http_server_handle.lock().unwrap() = Some(http_server.close_handle());
 
-    // On recepit of the signal, shut down the servers.
-    let _ = receiver.recv();
+    // At this point, both servers are running on separate threads with own tokio runtimes.
+    // Here we only wait until a shutdown signal comes.
+    let _ = shutdown_receiver.recv();
 
     // Send signals to each of the servers to shut down.
     if let Some(handle) = ipc_server_handle_clone.lock().unwrap().take() {
