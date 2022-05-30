@@ -52,7 +52,7 @@ struct Args {
     tracing: bool,
 }
 
-struct DirtyState(Apply<Vec<(H256, H256)>>);
+struct DirtyState(Apply<Vec<(String, String)>>);
 
 impl Serialize for DirtyState {
     fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
@@ -219,7 +219,10 @@ async fn run_evm_impl(
                                 address,
                                 basic,
                                 code,
-                                storage: storage.into_iter().collect(),
+                                storage: storage
+                                    .into_iter()
+                                    .map(|(k, v)| backend.encode_storage(k, v))
+                                    .collect(),
                                 reset_storage,
                             }),
                         })
