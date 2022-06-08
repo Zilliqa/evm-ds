@@ -157,14 +157,12 @@ async fn run_evm_impl(
     // panic. (Using the parent runtime and dropping on stack unwind will mess up the parent
     // runtime).
     tokio::task::spawn_blocking(move || {
-        let code = Rc::new(
-            hex::decode(&code_hex)
-                .map_err(|e| Error::invalid_params(format!("code: {}", e.to_string())))?,
-        );
-        let data = Rc::new(
-            hex::decode(&data_hex)
-                .map_err(|e| Error::invalid_params(format!("data: {}", e.to_string())))?,
-        );
+        let code = Rc::new(hex::decode(&code_hex).map_err(|e| {
+            Error::invalid_params(format!("code: '{}...' {}", &code_hex[..10], e.to_string()))
+        })?);
+        let data = Rc::new(hex::decode(&data_hex).map_err(|e| {
+            Error::invalid_params(format!("data: '{}...' {}", &code_hex[..10], e.to_string()))
+        })?);
 
         let config = evm::Config::london();
         let context = evm::Context {
