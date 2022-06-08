@@ -166,7 +166,7 @@ async fn run_evm_impl(
         let context = evm::Context {
             address: H160::from_str(&address).map_err(|e| Error::invalid_params(e.to_string()))?,
             caller: H160::from_str(&caller).map_err(|e| Error::invalid_params(e.to_string()))?,
-            apparent_value: U256::from_str(&apparent_value)
+            apparent_value: U256::from_dec_str(&apparent_value)
                 .map_err(|e| Error::invalid_params(e.to_string()))?,
         };
         let mut runtime = evm::Runtime::new(code, data, context, &config);
