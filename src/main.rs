@@ -157,17 +157,23 @@ async fn run_evm_impl(
     // panic. (Using the parent runtime and dropping on stack unwind will mess up the parent
     // runtime).
     tokio::task::spawn_blocking(move || {
-        let code =
-            Rc::new(hex::decode(&code_hex).map_err(|e| Error::invalid_params(e.to_string()))?);
-        let data =
-            Rc::new(hex::decode(&data_hex).map_err(|e| Error::invalid_params(e.to_string()))?);
+        let code = Rc::new(
+            hex::decode(&code_hex)
+                .map_err(|e| Error::invalid_params(format!("code: {}", e.to_string())))?,
+        );
+        let data = Rc::new(
+            hex::decode(&data_hex)
+                .map_err(|e| Error::invalid_params(format!("data: {}", e.to_string())))?,
+        );
 
         let config = evm::Config::london();
         let context = evm::Context {
-            address: H160::from_str(&address).map_err(|e| Error::invalid_params(e.to_string()))?,
-            caller: H160::from_str(&caller).map_err(|e| Error::invalid_params(e.to_string()))?,
+            address: H160::from_str(&address)
+                .map_err(|e| Error::invalid_params(format!("address: {}", e.to_string())))?,
+            caller: H160::from_str(&caller)
+                .map_err(|e| Error::invalid_params(format!("caller: {}", e.to_string())))?,
             apparent_value: U256::from_dec_str(&apparent_value)
-                .map_err(|e| Error::invalid_params(e.to_string()))?,
+                .map_err(|e| Error::invalid_params(format!("apparent_value: {}", e.to_string())))?,
         };
         let mut runtime = evm::Runtime::new(code, data, context, &config);
         let metadata = StackSubstateMetadata::new(gas_limit, &config);
