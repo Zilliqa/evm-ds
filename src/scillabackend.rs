@@ -1,4 +1,3 @@
-use std::mem;
 /// Backend implementation that stores EVM state via the Scilla JSONRPC interface.
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
@@ -43,7 +42,11 @@ impl ScillaBackend {
     }
 
     // Call the Scilla IPC Server API.
-    fn call_ipc_server_api(&self, method: &str, args: serde_json::Map<String, Value>) -> Value {
+    fn call_ipc_server_api(
+        &self,
+        method: &str,
+        args: serde_json::Map<String, Value>,
+    ) -> Result<Value> {
         debug!("call_ipc_server_api: {}, {:?}", method, args);
         // Within this runtime, we need a separate runtime just to handle all JSON
         // client operations. The runtime will then drop and close all connections
@@ -61,9 +64,7 @@ impl ScillaBackend {
             .await
         });
         if let Ok(result) = call_with_timeout {
-            result.unwrap_or_else(|e| {
-                panic!("{} call, err {:?}", method, e);
-            })
+            result.map_err(|_| Error::internal_error())
         } else {
             panic!("timeout calling {}", method);
         }
@@ -75,17 +76,19 @@ impl ScillaBackend {
         let mut args = serde_json::Map::new();
         args.insert("query_name".into(), query_name.into());
         args.insert("query_args".into(), query_args.unwrap_or_default().into());
-        let mut result = self.call_ipc_server_api("fetchBlockchainInfo", args);
+        let result = self
+            .call_ipc_server_api("fetchBlockchainInfo", args)
+            .unwrap_or_default();
         // Check that the call succeeded.
-        assert!(result
-            .get(0)
-            .expect("fetchBlockchainInfo result")
-            .as_bool()
-            .expect("fetchBlockchainInfo result"));
+        let null = Value::Null;
+        let succeeded = result.get(0).unwrap_or(&null).as_bool().unwrap_or_default();
 
-        // Check that there is a result of a given type.
-        let result = result.get_mut(1).expect("fetchBlockchainInfo result");
-        mem::take(result)
+        if succeeded {
+            // Check that there is a result of a given type.
+            result.get(1).unwrap_or(&null).clone()
+        } else {
+            null
+        }
     }
 
     fn query_jsonrpc_u64<OutputType: From<u64>>(&self, query_name: &str) -> OutputType {
@@ -122,40 +125,48 @@ impl ScillaBackend {
         );
 
         // If the RPC call failed, something is wrong, and it is better to crash.
-        let mut result = self.call_ipc_server_api("fetchExternalStateValueB64", args);
+        let result = self.call_ipc_server_api("fetchExternalStateValueB64", args);
         // If the RPC was okay, but we didn't get a value, that's
         // normal, just return empty code.
-        let default_false = Value::Bool(false);
-        if !result
-            .get(0)
-            .map_or_else(
-                || {
-                    if use_default {
-                        Ok(&default_false)
-                    } else {
-                        Err(Error::internal_error())
-                    }
-                },
-                Ok,
-            )?
-            .as_bool()
-            .unwrap_or_default()
-        {
-            return Ok(None);
-        }
-        // Check that there is a result of a given type.
-        let mut default_value = Value::String("".into());
-        let result = result.get_mut(1).map_or_else(
-            || {
-                if use_default {
-                    Ok(&mut default_value)
-                } else {
-                    Err(Error::internal_error())
+        match result {
+            Ok(result) => {
+                let default_false = Value::Bool(false);
+                if !result
+                    .get(0)
+                    .map_or_else(
+                        || {
+                            if use_default {
+                                Ok(&default_false)
+                            } else {
+                                Err(Error::internal_error())
+                            }
+                        },
+                        Ok,
+                    )?
+                    .as_bool()
+                    .unwrap_or_default()
+                {
+                    return Ok(None);
                 }
-            },
-            Ok,
-        )?;
-        Ok(Some(mem::take(result)))
+
+                // Check that there is a result of a given type.
+                let default_value = Value::String("".into());
+                let result = result.get(1).map_or_else(
+                    || {
+                        if use_default {
+                            Ok(&default_value)
+                        } else {
+                            Err(Error::internal_error())
+                        }
+                    },
+                    Ok,
+                )?;
+                Ok(Some(result.clone()))
+            }
+            Err(_) => {
+                return Ok(None);
+            }
+        }
     }
 
     // Encode key/value pairs for storage in such a way that the Zilliqa node
@@ -168,8 +179,10 @@ impl ScillaBackend {
         let mut val = ScillaMessage::ProtoScillaVal::new();
         let bval = value.as_bytes().to_vec();
         val.set_bval(bval.into());
-        (base64::encode(query.write_to_bytes().unwrap()),
-         base64::encode(val.write_to_bytes().unwrap()))
+        (
+            base64::encode(query.write_to_bytes().unwrap()),
+            base64::encode(val.write_to_bytes().unwrap()),
+        )
     }
 }
 
