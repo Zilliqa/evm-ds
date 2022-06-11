@@ -111,7 +111,7 @@ impl ScillaBackend {
         let mut query = ScillaMessage::ProtoScillaQuery::new();
         query.set_name(query_name.into());
         if let Some(key) = key {
-            query.set_indices(vec![bytes::Bytes::from(key.as_bytes().to_vec())]);
+            query.set_indices(vec![bytes::Bytes::from(format!("{:X}", key))]);
             query.set_mapdepth(1);
         } else {
             query.set_mapdepth(0);
@@ -174,7 +174,7 @@ impl ScillaBackend {
     pub(crate) fn encode_storage(&self, key: H256, value: H256) -> (String, String) {
         let mut query = ScillaMessage::ProtoScillaQuery::new();
         query.set_name("_evm_storage".into());
-        query.set_indices(vec![bytes::Bytes::from(key.as_bytes().to_vec())]);
+        query.set_indices(vec![bytes::Bytes::from(format!("{:X}", key))]);
         query.set_mapdepth(1);
         let mut val = ScillaMessage::ProtoScillaVal::new();
         let bval = value.as_bytes().to_vec();
