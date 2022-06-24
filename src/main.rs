@@ -4,9 +4,11 @@
 #![forbid(unsafe_code)]
 
 mod ipc_connect;
+mod precompiles;
 mod protos;
 mod scillabackend;
 
+use std::collections::BTreeMap;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::panic::{self, AssertUnwindSafe};
 use std::path::PathBuf;
@@ -16,7 +18,7 @@ use std::sync::{Arc, Mutex};
 use clap::Parser;
 use evm::{
     backend::Apply,
-    executor::stack::{MemoryStackState, StackSubstateMetadata},
+    executor::stack::{MemoryStackState, PrecompileFn, StackSubstateMetadata},
     tracing,
 };
 
@@ -177,8 +179,11 @@ async fn run_evm_impl(
         let metadata = StackSubstateMetadata::new(gas_limit, &config);
         let state = MemoryStackState::new(metadata, &backend);
 
-        // TODO: replace with the real precompiles
-        let precompiles = ();
+        // TODO: implement all precompiles.
+        let precompiles = BTreeMap::from([(
+            H160::from_str("0x01").unwrap(),
+            precompiles::ecrecover as PrecompileFn,
+        )]);
 
         let mut executor =
             evm::executor::stack::StackExecutor::new_with_precompiles(state, &config, &precompiles);
