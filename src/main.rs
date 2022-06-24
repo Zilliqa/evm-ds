@@ -143,6 +143,7 @@ impl Rpc for EvmServer {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn run_evm_impl(
     address: String,
     caller: String,
@@ -160,20 +161,20 @@ async fn run_evm_impl(
     // runtime).
     tokio::task::spawn_blocking(move || {
         let code = Rc::new(hex::decode(&code_hex).map_err(|e| {
-            Error::invalid_params(format!("code: '{}...' {}", &code_hex[..10], e.to_string()))
+            Error::invalid_params(format!("code: '{}...' {}", &code_hex[..10], e))
         })?);
         let data = Rc::new(hex::decode(&data_hex).map_err(|e| {
-            Error::invalid_params(format!("data: '{}...' {}", &data_hex[..10], e.to_string()))
+            Error::invalid_params(format!("data: '{}...' {}", &data_hex[..10], e))
         })?);
 
         let config = evm::Config::london();
         let context = evm::Context {
             address: H160::from_str(&address)
-                .map_err(|e| Error::invalid_params(format!("address: {}", e.to_string())))?,
+                .map_err(|e| Error::invalid_params(format!("address: {}", e)))?,
             caller: H160::from_str(&caller)
-                .map_err(|e| Error::invalid_params(format!("caller: {}", e.to_string())))?,
+                .map_err(|e| Error::invalid_params(format!("caller: {}", e)))?,
             apparent_value: U256::from_dec_str(&apparent_value)
-                .map_err(|e| Error::invalid_params(format!("apparent_value: {}", e.to_string())))?,
+                .map_err(|e| Error::invalid_params(format!("apparent_value: {}", e)))?,
         };
         let mut runtime = evm::Runtime::new(code, data, context, &config);
         let metadata = StackSubstateMetadata::new(gas_limit, &config);

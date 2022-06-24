@@ -164,7 +164,7 @@ impl ScillaBackend {
                 Ok(Some(result.clone()))
             }
             Err(_) => {
-                return Ok(None);
+                Ok(None)
             }
         }
     }
