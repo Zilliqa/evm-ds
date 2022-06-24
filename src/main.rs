@@ -180,7 +180,7 @@ async fn run_evm_impl(
         let state = MemoryStackState::new(metadata, &backend);
 
         // TODO: implement all precompiles.
-        let precompiles: BTreeMap<H160, PrecompileFn> = BTreeMap::from([(
+        let precompiles = BTreeMap::from([(
             H160::from_str("0x01").unwrap(),
             precompiles::ecrecover as PrecompileFn,
         )]);
