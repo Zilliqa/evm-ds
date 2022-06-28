@@ -16,6 +16,9 @@ use protobuf::Message;
 use crate::ipc_connect;
 use crate::protos::ScillaMessage;
 
+/// Chain ID base for all Zilliqa-based EVM chains. Needed to avoid
+/// having same chain IDs for Zilliqa EVMs as for other Eth-based chains.
+/// See https://zilliqa-jira.atlassian.net/browse/ZIL-4668
 const BASE_CHAIN_ID: u64 = 33000;
 
 pub struct ScillaBackendFactory {
@@ -111,10 +114,17 @@ impl ScillaBackend {
         }
     }
 
-    fn query_jsonrpc_u64<OutputType: From<u64>>(&self, query_name: &str) -> OutputType {
-        serde_json::from_value::<u64>(self.query_jsonrpc(query_name, None))
+    fn query_jsonrpc_u256(&self, query_name: &str) -> U256 {
+        self.query_jsonrpc(query_name, None)
+            .as_str()
+            .and_then(|s| {
+                if s.starts_with("0x") {
+                    U256::from_str(&s[2..]).ok()
+                } else {
+                    U256::from_dec_str(&s).ok()
+                }
+            })
             .unwrap_or_default()
-            .into()
     }
 
     fn query_state_value(
@@ -228,7 +238,7 @@ impl<'config> Backend for ScillaBackend {
     }
 
     fn block_number(&self) -> U256 {
-        self.query_jsonrpc_u64("BLOCKNUMBER")
+        self.query_jsonrpc_u256("BLOCKNUMBER")
     }
 
     fn block_coinbase(&self) -> H160 {
@@ -237,15 +247,15 @@ impl<'config> Backend for ScillaBackend {
     }
 
     fn block_timestamp(&self) -> U256 {
-        self.query_jsonrpc_u64("TIMESTAMP")
+        self.query_jsonrpc_u256("TIMESTAMP")
     }
 
     fn block_difficulty(&self) -> U256 {
-        self.query_jsonrpc_u64("BLOCKDIFFICULTY")
+        self.query_jsonrpc_u256("BLOCKDIFFICULTY")
     }
 
     fn block_gas_limit(&self) -> U256 {
-        self.query_jsonrpc_u64("BLOCKGASLIMIT")
+        self.query_jsonrpc_u256("BLOCKGASLIMIT")
     }
 
     fn block_base_fee_per_gas(&self) -> U256 {
@@ -253,8 +263,9 @@ impl<'config> Backend for ScillaBackend {
     }
 
     fn chain_id(&self) -> U256 {
-        let chain_id: u64 = self.query_jsonrpc_u64("CHAINID");
-        (chain_id + BASE_CHAIN_ID).into()
+        // TODO: A hack to avoid mixing CHAIN IDs with Ethereum based Chain IDs
+        // See https://zilliqa-jira.atlassian.net/browse/ZIL-4668
+        self.query_jsonrpc_u256("CHAINID") + BASE_CHAIN_ID
     }
 
     fn exists(&self, address: H160) -> bool {
