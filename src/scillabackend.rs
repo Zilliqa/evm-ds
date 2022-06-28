@@ -34,6 +34,26 @@ pub struct ScillaBackend {
     path: PathBuf,
 }
 
+// Adding some convenience to ProtoScillaVal to convert to U256 and bytes.
+impl ScillaMessage::ProtoScillaVal {
+    fn as_uint256(&self) -> Option<U256> {
+        // Parse the way  ContractStorage::FetchExternalStateValue encodes it.
+        String::from_utf8(self.get_bval().to_vec())
+            .ok()
+            .and_then(|s| {
+                if s.starts_with("0x") {
+                    U256::from_str(&s[2..]).ok()
+                } else {
+                    U256::from_dec_str(&s).ok()
+                }
+            })
+    }
+
+    fn as_bytes(&self) -> Vec<u8> {
+        Vec::from(self.get_bval())
+    }
+}
+
 impl ScillaBackend {
     pub fn new<P: AsRef<Path>>(path: P) -> Self {
         Self {
@@ -103,7 +123,7 @@ impl ScillaBackend {
         query_name: &str,
         key: Option<H256>,
         use_default: bool,
-    ) -> Result<Option<Value>> {
+    ) -> Result<Option<ScillaMessage::ProtoScillaVal>> {
         info!(
             "query_state_value: {} {} {:?} {}",
             address, query_name, key, use_default
@@ -150,22 +170,28 @@ impl ScillaBackend {
                 }
 
                 // Check that there is a result of a given type.
-                let default_value = Value::String("".into());
-                let result = result.get(1).map_or_else(
+                let default_value = ScillaMessage::ProtoScillaVal::new();
+                result.get(1).map_or_else(
                     || {
                         if use_default {
-                            Ok(&default_value)
+                            Ok(Some(default_value))
                         } else {
                             Err(Error::internal_error())
                         }
                     },
-                    Ok,
-                )?;
-                Ok(Some(result.clone()))
+                    |value| {
+                        value
+                            .as_str()
+                            .map(|value_str| {
+                                base64::decode(value_str).ok().and_then(|buffer| {
+                                    ScillaMessage::ProtoScillaVal::parse_from_bytes(&buffer).ok()
+                                })
+                            })
+                            .ok_or(Error::internal_error())
+                    },
+                )
             }
-            Err(_) => {
-                Ok(None)
-            }
+            Err(_) => Ok(None),
         }
     }
 
@@ -239,18 +265,16 @@ impl<'config> Backend for ScillaBackend {
     }
 
     fn basic(&self, address: H160) -> Basic {
-        let result = self
+        let balance = self
             .query_state_value(address, "_balance", None, true)
             .expect("query_state_value _balance")
-            .map(|x| x.as_u64().unwrap_or_default())
+            .and_then(|x| x.as_uint256())
             .unwrap_or_default();
-        let balance = U256::from(result);
-        let result = self
+        let nonce = self
             .query_state_value(address, "_nonce", None, false)
             .expect("query_state_value _nonce")
-            .map(|x| x.as_u64().unwrap_or_default())
+            .and_then(|x| x.as_uint256())
             .unwrap_or_default();
-        let nonce = U256::from(result);
         Basic { balance, nonce }
     }
 
@@ -258,18 +282,15 @@ impl<'config> Backend for ScillaBackend {
         self.query_state_value(address, "_code", None, true)
             .expect("query_state_value(_code)")
             .expect("query_state_value(_code) result")
-            .as_str()
-            .unwrap_or("")
-            .to_string()
-            .into_bytes()
+            .as_bytes()
     }
 
     fn storage(&self, address: H160, key: H256) -> H256 {
-        let result = self
+        let mut result = self
             .query_state_value(address, "_evm_storage", Some(key), true)
             .expect("query_state_value(_evm_storage)")
+            .map(|value| value.as_bytes())
             .unwrap_or_default();
-        let mut result = hex::decode(result.as_str().unwrap_or_default()).unwrap_or_default();
         // H256::from_slice expects big-endian, we filled the first bytes from decoding,
         // now need to extend to the required size.
         result.resize(256 / 8, 0u8);
