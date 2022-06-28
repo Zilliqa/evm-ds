@@ -182,7 +182,7 @@ async fn run_evm_impl(
 
         // TODO: implement all precompiles.
         let precompiles = BTreeMap::from([(
-            H160::from_str("0x01").unwrap(),
+            H160::from_str("0000000000000000000000000000000000000001").unwrap(),
             precompiles::ecrecover as PrecompileFn,
         )]);
 
