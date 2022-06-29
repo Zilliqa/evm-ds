@@ -16,6 +16,9 @@ use protobuf::Message;
 use crate::ipc_connect;
 use crate::protos::ScillaMessage;
 
+/// Chain ID base for all Zilliqa-based EVM chains. Needed to avoid
+/// having same chain IDs for Zilliqa EVMs as for other Eth-based chains.
+/// See https://zilliqa-jira.atlassian.net/browse/ZIL-4668
 const BASE_CHAIN_ID: u64 = 33000;
 
 pub struct ScillaBackendFactory {
@@ -32,6 +35,26 @@ impl ScillaBackendFactory {
 pub struct ScillaBackend {
     // Path to the Unix domain socket over which we talk to the Node.
     path: PathBuf,
+}
+
+// Adding some convenience to ProtoScillaVal to convert to U256 and bytes.
+impl ScillaMessage::ProtoScillaVal {
+    fn as_uint256(&self) -> Option<U256> {
+        // Parse the way  ContractStorage::FetchExternalStateValue encodes it.
+        String::from_utf8(self.get_bval().to_vec())
+            .ok()
+            .and_then(|s| {
+                if s.starts_with("0x") {
+                    U256::from_str(&s[2..]).ok()
+                } else {
+                    U256::from_dec_str(&s).ok()
+                }
+            })
+    }
+
+    fn as_bytes(&self) -> Vec<u8> {
+        Vec::from(self.get_bval())
+    }
 }
 
 impl ScillaBackend {
@@ -91,10 +114,17 @@ impl ScillaBackend {
         }
     }
 
-    fn query_jsonrpc_u64<OutputType: From<u64>>(&self, query_name: &str) -> OutputType {
-        serde_json::from_value::<u64>(self.query_jsonrpc(query_name, None))
+    fn query_jsonrpc_u256(&self, query_name: &str) -> U256 {
+        self.query_jsonrpc(query_name, None)
+            .as_str()
+            .and_then(|s| {
+                if s.starts_with("0x") {
+                    U256::from_str(&s[2..]).ok()
+                } else {
+                    U256::from_dec_str(&s).ok()
+                }
+            })
             .unwrap_or_default()
-            .into()
     }
 
     fn query_state_value(
@@ -103,7 +133,7 @@ impl ScillaBackend {
         query_name: &str,
         key: Option<H256>,
         use_default: bool,
-    ) -> Result<Option<Value>> {
+    ) -> Result<Option<ScillaMessage::ProtoScillaVal>> {
         info!(
             "query_state_value: {} {} {:?} {}",
             address, query_name, key, use_default
@@ -150,22 +180,28 @@ impl ScillaBackend {
                 }
 
                 // Check that there is a result of a given type.
-                let default_value = Value::String("".into());
-                let result = result.get(1).map_or_else(
+                let default_value = ScillaMessage::ProtoScillaVal::new();
+                result.get(1).map_or_else(
                     || {
                         if use_default {
-                            Ok(&default_value)
+                            Ok(Some(default_value))
                         } else {
                             Err(Error::internal_error())
                         }
                     },
-                    Ok,
-                )?;
-                Ok(Some(result.clone()))
+                    |value| {
+                        value
+                            .as_str()
+                            .map(|value_str| {
+                                base64::decode(value_str).ok().and_then(|buffer| {
+                                    ScillaMessage::ProtoScillaVal::parse_from_bytes(&buffer).ok()
+                                })
+                            })
+                            .ok_or(Error::internal_error())
+                    },
+                )
             }
-            Err(_) => {
-                Ok(None)
-            }
+            Err(_) => Ok(None),
         }
     }
 
@@ -202,7 +238,7 @@ impl<'config> Backend for ScillaBackend {
     }
 
     fn block_number(&self) -> U256 {
-        self.query_jsonrpc_u64("BLOCKNUMBER")
+        self.query_jsonrpc_u256("BLOCKNUMBER")
     }
 
     fn block_coinbase(&self) -> H160 {
@@ -211,15 +247,15 @@ impl<'config> Backend for ScillaBackend {
     }
 
     fn block_timestamp(&self) -> U256 {
-        self.query_jsonrpc_u64("TIMESTAMP")
+        self.query_jsonrpc_u256("TIMESTAMP")
     }
 
     fn block_difficulty(&self) -> U256 {
-        self.query_jsonrpc_u64("BLOCKDIFFICULTY")
+        self.query_jsonrpc_u256("BLOCKDIFFICULTY")
     }
 
     fn block_gas_limit(&self) -> U256 {
-        self.query_jsonrpc_u64("BLOCKGASLIMIT")
+        self.query_jsonrpc_u256("BLOCKGASLIMIT")
     }
 
     fn block_base_fee_per_gas(&self) -> U256 {
@@ -227,8 +263,9 @@ impl<'config> Backend for ScillaBackend {
     }
 
     fn chain_id(&self) -> U256 {
-        let chain_id: u64 = self.query_jsonrpc_u64("CHAINID");
-        (chain_id + BASE_CHAIN_ID).into()
+        // TODO: A hack to avoid mixing CHAIN IDs with Ethereum based Chain IDs
+        // See https://zilliqa-jira.atlassian.net/browse/ZIL-4668
+        self.query_jsonrpc_u256("CHAINID") + BASE_CHAIN_ID
     }
 
     fn exists(&self, address: H160) -> bool {
@@ -239,18 +276,16 @@ impl<'config> Backend for ScillaBackend {
     }
 
     fn basic(&self, address: H160) -> Basic {
-        let result = self
+        let balance = self
             .query_state_value(address, "_balance", None, true)
             .expect("query_state_value _balance")
-            .map(|x| x.as_u64().unwrap_or_default())
+            .and_then(|x| x.as_uint256())
             .unwrap_or_default();
-        let balance = U256::from(result);
-        let result = self
+        let nonce = self
             .query_state_value(address, "_nonce", None, false)
             .expect("query_state_value _nonce")
-            .map(|x| x.as_u64().unwrap_or_default())
+            .and_then(|x| x.as_uint256())
             .unwrap_or_default();
-        let nonce = U256::from(result);
         Basic { balance, nonce }
     }
 
@@ -258,18 +293,15 @@ impl<'config> Backend for ScillaBackend {
         self.query_state_value(address, "_code", None, true)
             .expect("query_state_value(_code)")
             .expect("query_state_value(_code) result")
-            .as_str()
-            .unwrap_or("")
-            .to_string()
-            .into_bytes()
+            .as_bytes()
     }
 
     fn storage(&self, address: H160, key: H256) -> H256 {
-        let result = self
+        let mut result = self
             .query_state_value(address, "_evm_storage", Some(key), true)
             .expect("query_state_value(_evm_storage)")
+            .map(|value| value.as_bytes())
             .unwrap_or_default();
-        let mut result = hex::decode(result.as_str().unwrap_or_default()).unwrap_or_default();
         // H256::from_slice expects big-endian, we filled the first bytes from decoding,
         // now need to extend to the required size.
         result.resize(256 / 8, 0u8);
