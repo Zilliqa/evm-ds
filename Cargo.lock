@@ -498,6 +498,7 @@ dependencies = [
  "protobuf",
  "protoc-rust",
  "serde",
+ "serde_yaml",
  "sha3",
  "tokio",
 ]
