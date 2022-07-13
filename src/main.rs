@@ -273,11 +273,19 @@ impl tracing::EventListener for LoggingEventListener {
 fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     let args = Args::parse();
 
-    log4rs::init_file(
-        args.log4rs.unwrap_or("log4rs.yml".to_string()),
-        Default::default(),
-    )
-    .unwrap();
+    match args.log4rs {
+        Some(log_config) if log_config != "" => {
+            log4rs::init_file(
+                log_config,
+                Default::default(),
+            ).unwrap();
+        },
+        _ => {
+            let config_str = include_str!("../log4rs-local.yml");
+            let config = serde_yaml::from_str(config_str).unwrap();
+            log4rs::init_raw_config(config).unwrap();
+        }
+    }
 
     info!("Starting evm-ds");
 
