@@ -52,6 +52,10 @@ struct Args {
     /// Trace the execution with debug logging.
     #[clap(short, long)]
     tracing: bool,
+
+    /// Log file (if not set, stderr is used).
+    #[clap(short, long)]
+    log4rs: Option<String>,
 }
 
 struct DirtyState(Apply<Vec<(String, String)>>);
@@ -160,12 +164,14 @@ async fn run_evm_impl(
     // panic. (Using the parent runtime and dropping on stack unwind will mess up the parent
     // runtime).
     tokio::task::spawn_blocking(move || {
-        let code = Rc::new(hex::decode(&code_hex).map_err(|e| {
-            Error::invalid_params(format!("code: '{}...' {}", &code_hex[..10], e))
-        })?);
-        let data = Rc::new(hex::decode(&data_hex).map_err(|e| {
-            Error::invalid_params(format!("data: '{}...' {}", &data_hex[..10], e))
-        })?);
+        let code =
+            Rc::new(hex::decode(&code_hex).map_err(|e| {
+                Error::invalid_params(format!("code: '{}...' {}", &code_hex[..10], e))
+            })?);
+        let data =
+            Rc::new(hex::decode(&data_hex).map_err(|e| {
+                Error::invalid_params(format!("data: '{}...' {}", &data_hex[..10], e))
+            })?);
 
         let config = evm::Config::london();
         let context = evm::Context {
@@ -265,18 +271,16 @@ impl tracing::EventListener for LoggingEventListener {
 }
 
 fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
-    env_logger::Builder::new()
-        .filter_level(log::LevelFilter::Info)
-        .parse_env("EVM_LOG")
-        .init();
-
-    // Required methods:
-    // - check (_json - wtf is the parameter?)
-    // - run (_json)
-    // - disambiguate (_json)
-
     let args = Args::parse();
-    // Connect to the backend as needed.
+
+    log4rs::init_file(
+        args.log4rs.unwrap_or("log4rs.yml".to_string()),
+        Default::default(),
+    )
+    .unwrap();
+
+    info!("Starting evm-ds");
+
     let evm_sever = EvmServer {
         tracing: args.tracing,
         backend_factory: ScillaBackendFactory {
