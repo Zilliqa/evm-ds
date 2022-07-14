@@ -79,7 +79,9 @@ impl ScillaBackend {
             .build()
             .unwrap();
         let call_with_timeout = rt.block_on(async move {
-            let client: RawClient = ipc_connect::ipc_connect(&self.path).await.unwrap();
+            let client: RawClient = ipc_connect::ipc_connect(&self.path)
+                .await
+                .expect("Failed to connect to the node Unix domain socket");
             tokio::time::timeout(
                 tokio::time::Duration::from_secs(2), // Require response in 2 secs max.
                 client.call_method(method, Params::Map(args)),

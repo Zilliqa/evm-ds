@@ -25,7 +25,7 @@ use evm::{
 use serde::ser::{Serialize, SerializeStructVariant, Serializer};
 
 use core::str::FromStr;
-use log::{debug, info};
+use log::{debug, error, info};
 
 use jsonrpc_core::{BoxFuture, Error, IoHandler, Result};
 use jsonrpc_derive::rpc;
@@ -247,15 +247,21 @@ async fn run_evm_impl(
                     remaining_gas,
                 })
             }
-            Err(_) => Ok(EvmResult {
-                exit_reason: evm::ExitReason::Fatal(evm::ExitFatal::Other(
-                    "EVM execution failed".into(),
-                )),
-                return_value: "".to_string(),
-                apply: vec![],
-                logs: vec![], // TODO: shouldn't we get the logs here too?
-                remaining_gas,
-            }),
+            Err(panic) => {
+                let panic_message = panic
+                    .downcast::<String>()
+                    .unwrap_or(Box::new("unknown panic".to_string()));
+                error!("EVM panicked: '{:?}'", panic_message);
+                Ok(EvmResult {
+                    exit_reason: evm::ExitReason::Fatal(evm::ExitFatal::Other(
+                        format!("EVM execution failed: '{:?}'", panic_message).into(),
+                    )),
+                    return_value: "".to_string(),
+                    apply: vec![],
+                    logs: vec![], // TODO: shouldn't we get the logs here too?
+                    remaining_gas,
+                })
+            }
         }
     })
     .await
@@ -275,11 +281,8 @@ fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
 
     match args.log4rs {
         Some(log_config) if log_config != "" => {
-            log4rs::init_file(
-                log_config,
-                Default::default(),
-            ).unwrap();
-        },
+            log4rs::init_file(log_config, Default::default()).unwrap();
+        }
         _ => {
             let config_str = include_str!("../log4rs-local.yml");
             let config = serde_yaml::from_str(config_str).unwrap();
