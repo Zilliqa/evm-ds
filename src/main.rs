@@ -56,6 +56,10 @@ struct Args {
     /// Log file (if not set, stderr is used).
     #[clap(short, long)]
     log4rs: Option<String>,
+
+    /// How much EVM gas is one Scilla gas worth.
+    #[clap(long, default_value = "100")]
+    gas_scaling_factor: u64,
 }
 
 struct DirtyState(Apply<Vec<(String, String)>>);
@@ -117,6 +121,7 @@ pub trait Rpc: Send + 'static {
 struct EvmServer {
     tracing: bool,
     backend_factory: ScillaBackendFactory,
+    gas_scaling_factor: u64,
 }
 
 impl Rpc for EvmServer {
@@ -131,6 +136,7 @@ impl Rpc for EvmServer {
     ) -> BoxFuture<Result<EvmResult>> {
         let backend = self.backend_factory.new_backend();
         let tracing = self.tracing;
+        let gas_scaling_factor = self.gas_scaling_factor;
         Box::pin(async move {
             run_evm_impl(
                 address,
@@ -141,6 +147,7 @@ impl Rpc for EvmServer {
                 gas_limit,
                 backend,
                 tracing,
+                gas_scaling_factor,
             )
             .await
         })
@@ -157,6 +164,7 @@ async fn run_evm_impl(
     gas_limit: u64,
     backend: ScillaBackend,
     tracing: bool,
+    gas_scaling_factor: u64,
 ) -> Result<EvmResult> {
     // We must spawn a separate blocking task (on a blocking thread), because by default a JSONRPC
     // method runs as a non-blocking thread under a tokio runtime, and creating a new runtime
@@ -183,6 +191,8 @@ async fn run_evm_impl(
                 .map_err(|e| Error::invalid_params(format!("apparent_value: {}", e)))?,
         };
         let mut runtime = evm::Runtime::new(code, data, context, &config);
+        // Scale the gas limit.
+        let gas_limit = gas_limit * gas_scaling_factor;
         let metadata = StackSubstateMetadata::new(gas_limit, &config);
         let state = MemoryStackState::new(metadata, &backend);
 
@@ -213,7 +223,8 @@ async fn run_evm_impl(
                 executor.execute(&mut runtime)
             }
         }));
-        let remaining_gas = executor.gas();
+        // Scale back remaining gas to Scilla units (no rounding!).
+        let remaining_gas = executor.gas() / gas_scaling_factor;
         match result {
             Ok(exit_reason) => {
                 info!("Exit: {:?}", exit_reason);
@@ -297,6 +308,7 @@ fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
         backend_factory: ScillaBackendFactory {
             path: PathBuf::from(args.node_socket),
         },
+        gas_scaling_factor: args.gas_scaling_factor,
     };
 
     // Setup a channel to signal a shutdown.
