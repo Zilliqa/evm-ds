@@ -44,6 +44,7 @@ impl ScillaMessage::ProtoScillaVal {
         String::from_utf8(self.get_bval().to_vec())
             .ok()
             .and_then(|s| {
+                let s = s.replace("\"", "");
                 if s.starts_with("0x") {
                     U256::from_str(&s[2..]).ok()
                 } else {
@@ -120,6 +121,7 @@ impl ScillaBackend {
         self.query_jsonrpc(query_name, None)
             .as_str()
             .and_then(|s| {
+                let s = s.replace("\"", "");
                 if s.starts_with("0x") {
                     U256::from_str(&s[2..]).ok()
                 } else {
@@ -284,7 +286,7 @@ impl<'config> Backend for ScillaBackend {
             .and_then(|x| x.as_uint256())
             .unwrap_or_default();
         let nonce = self
-            .query_state_value(address, "_nonce", None, false)
+            .query_state_value(address, "_nonce", None, true)
             .expect("query_state_value _nonce")
             .and_then(|x| x.as_uint256())
             .unwrap_or_default();
