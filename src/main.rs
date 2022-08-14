@@ -284,7 +284,7 @@ struct LoggingEventListener;
 
 impl tracing::EventListener for LoggingEventListener {
     fn event(&mut self, event: tracing::Event) {
-        debug!("{:?}", event);
+        debug!("EVM Event {:?}", event);
     }
 }
 
