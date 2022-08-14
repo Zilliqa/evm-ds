@@ -81,7 +81,7 @@ impl Serialize for DirtyState {
                 state.serialize_field("address", address)?;
                 state.serialize_field("balance", &basic.balance)?;
                 state.serialize_field("nonce", &basic.nonce)?;
-                state.serialize_field("code", code)?;
+                state.serialize_field("code", &code.as_ref().map(hex::encode))?;
                 state.serialize_field("storage", storage)?;
                 state.serialize_field("reset_storage", &reset_storage)?;
                 Ok(state.end()?)
@@ -229,6 +229,7 @@ async fn run_evm_impl(
             Ok(exit_reason) => {
                 info!("Exit: {:?}", exit_reason);
                 let (state_apply, logs) = executor.into_state().deconstruct();
+                info!("Return value: {:?}", hex::encode(runtime.machine().return_value()));
                 Ok(EvmResult {
                     exit_reason,
                     return_value: hex::encode(runtime.machine().return_value()),
@@ -283,7 +284,7 @@ struct LoggingEventListener;
 
 impl tracing::EventListener for LoggingEventListener {
     fn event(&mut self, event: tracing::Event) {
-        debug!("{:?}", event);
+        debug!("EVM Event {:?}", event);
     }
 }
 
