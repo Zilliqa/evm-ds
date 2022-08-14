@@ -296,8 +296,8 @@ impl<'config> Backend for ScillaBackend {
     fn code(&self, address: H160) -> Vec<u8> {
         self.query_state_value(address, "_code", None, true)
             .expect("query_state_value(_code)")
-            .expect("query_state_value(_code) result")
-            .as_bytes()
+            .map(|value| value.as_bytes())
+            .unwrap_or_default()
     }
 
     fn storage(&self, address: H160, key: H256) -> H256 {
