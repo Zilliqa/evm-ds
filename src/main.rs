@@ -3,12 +3,13 @@
 // #![deny(warnings)]
 #![forbid(unsafe_code)]
 
+mod continuation;
 mod ipc_connect;
 mod precompiles;
 mod protos;
 mod scillabackend;
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::panic::{self, AssertUnwindSafe};
 use std::path::PathBuf;
@@ -27,6 +28,7 @@ use serde::ser::{Serialize, SerializeStructVariant, Serializer};
 use core::str::FromStr;
 use log::{debug, error, info};
 
+use continuation::Continuation;
 use jsonrpc_core::{BoxFuture, Error, IoHandler, Result};
 use jsonrpc_derive::rpc;
 use jsonrpc_server_utils::codecs;
@@ -98,6 +100,7 @@ pub struct EvmResult {
     apply: Vec<DirtyState>,
     logs: Vec<ethereum::Log>,
     remaining_gas: u64,
+    continuation_id: usize,
 }
 
 #[rpc(server)]
@@ -111,12 +114,27 @@ pub trait Rpc: Send + 'static {
         data: String,
         apparent_value: String,
         gas_limit: u64,
+        continuation_id: usize,
     ) -> BoxFuture<Result<EvmResult>>;
 }
 
 struct EvmServer {
+    // Whether tracing is enabled for this instance of EVM server.
     tracing: bool,
+    // A factory that produces scilla backends.
     backend_factory: ScillaBackendFactory,
+    // A cache of known continuations.
+    continuations: HashMap<usize, Continuation>,
+}
+
+impl EvmServer {
+    fn continuation_by_id(&mut self, continuation_id: usize) -> Option<Continuation> {
+        if continuation_id > 0 { 
+            self.continuations.remove(&continuation_id)
+        } else {
+            None
+        }
+    }
 }
 
 impl Rpc for EvmServer {
@@ -128,22 +146,28 @@ impl Rpc for EvmServer {
         data_hex: String,
         apparent_value: String,
         gas_limit: u64,
+        continuation_id: usize,
     ) -> BoxFuture<Result<EvmResult>> {
         let backend = self.backend_factory.new_backend();
         let tracing = self.tracing;
-        Box::pin(async move {
-            run_evm_impl(
-                address,
-                caller,
-                code_hex,
-                data_hex,
-                apparent_value,
-                gas_limit,
-                backend,
-                tracing,
-            )
-            .await
-        })
+        Box::pin(
+            self.continuation_by_id(continuation_id)
+                .ok_or_else(|| Err("unknown continuation"))
+                .and_then(|continuation| async move {
+                    run_evm_impl(
+                        address,
+                        caller,
+                        code_hex,
+                        data_hex,
+                        apparent_value,
+                        gas_limit,
+                        continuation,
+                        backend,
+                        tracing,
+                    )
+                    .await
+                }),
+        )
     }
 }
 
@@ -155,6 +179,7 @@ async fn run_evm_impl(
     data_hex: String,
     apparent_value: String,
     gas_limit: u64,
+    continuation: Continuation,
     backend: ScillaBackend,
     tracing: bool,
 ) -> Result<EvmResult> {
@@ -174,14 +199,20 @@ async fn run_evm_impl(
             })?);
 
         let config = evm::Config::london();
-        let context = evm::Context {
-            address: H160::from_str(&address)
-                .map_err(|e| Error::invalid_params(format!("address: {}", e)))?,
-            caller: H160::from_str(&caller)
-                .map_err(|e| Error::invalid_params(format!("caller: {}", e)))?,
-            apparent_value: U256::from_dec_str(&apparent_value)
-                .map_err(|e| Error::invalid_params(format!("apparent_value: {}", e)))?,
-        };
+        let mut continuation = continuation;
+        let context = continuation.get_context().map_or_else(
+            || {
+                Ok::<evm::Context, jsonrpc_core::Error>(evm::Context {
+                    address: H160::from_str(&address)
+                        .map_err(|e| Error::invalid_params(format!("address: {}", e)))?,
+                    caller: H160::from_str(&caller)
+                        .map_err(|e| Error::invalid_params(format!("caller: {}", e)))?,
+                    apparent_value: U256::from_dec_str(&apparent_value)
+                        .map_err(|e| Error::invalid_params(format!("apparent_value: {}", e)))?,
+                })
+            },
+            Ok,
+        )?;
         let mut runtime = evm::Runtime::new(code, data, context, &config);
         let metadata = StackSubstateMetadata::new(gas_limit, &config);
         let state = MemoryStackState::new(metadata, &backend);
@@ -245,6 +276,7 @@ async fn run_evm_impl(
                         .collect(),
                     logs: logs.into_iter().collect(),
                     remaining_gas,
+                    continuation_id: 0,
                 })
             }
             Err(panic) => {
@@ -260,6 +292,7 @@ async fn run_evm_impl(
                     apply: vec![],
                     logs: vec![], // TODO: shouldn't we get the logs here too?
                     remaining_gas,
+                    continuation_id: 0
                 })
             }
         }
@@ -297,6 +330,7 @@ fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
         backend_factory: ScillaBackendFactory {
             path: PathBuf::from(args.node_socket),
         },
+        continuations: HashMap::new(),
     };
 
     // Setup a channel to signal a shutdown.
